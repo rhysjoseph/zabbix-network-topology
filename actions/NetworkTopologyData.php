@@ -693,6 +693,26 @@ class NetworkTopologyData extends NetworkTopologyController {
                 'preservekeys' => true
             ]);
 
+            // Standard-SNMP-Templates tragen den IFNAME oft nur als Item-Tag.
+            // Nur Status-Items nachladen: ein Tag-Satz je Interface statt
+            // Tags fuer alle Traffic-/Fehler-/Speed-Items im Speicher zu halten.
+            $status_ids = [];
+            foreach ($chunk as $iid => $item) {
+                if (MetricExtractor::interfaceStatusIndex($item['key_']) !== '') {
+                    $status_ids[] = $iid;
+                }
+            }
+            if ($status_ids) {
+                $tagged = API::Item()->get([
+                    'output' => ['itemid'], 'itemids' => $status_ids,
+                    'selectTags' => ['tag', 'value'], 'preservekeys' => true
+                ]);
+                foreach ($tagged as $iid => $item) {
+                    $chunk[$iid]['tags'] = $item['tags'] ?? [];
+                }
+                unset($tagged);
+            }
+
             // ── 3b. LASTVALUE, je Stueck ──────────────────────────────────
             //
             // SETZT SQL-HISTORY VORAUS. Zabbix kann History auch nach
