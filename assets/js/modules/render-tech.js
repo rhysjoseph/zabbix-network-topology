@@ -45,7 +45,8 @@ import {
 } from './manual-links.js';
 import { ensureBaseToolbar } from './tabs.js';
 import { updateKpi, refreshKpi } from './kpi.js';
-import { applyTrafficHeatmap, startEdgeAnimation } from './traffic.js';
+import { applyTrafficHeatmap, startEdgeAnimation, markDisasterState } from './traffic.js';
+import { topologySignature, refreshEdgeData } from './refresh-edges.js';
 import { applyBundleView, bindBundleView, trunkData } from './parallel-links.js';
 import { collapseLeaves, bindCollapse, leafCandidates, collapsePref,
          COLLAPSE_SCHWELLE } from './collapse-leaves.js';
@@ -113,6 +114,8 @@ function _markRefresh(ok, err) {
 
 export function render(wrap, nodes, edges, dataUrl) {
     perfBegin('render tech (' + nodes.length + ' nodes, ' + edges.length + ' edges)');
+    const refreshSignature = topologySignature(nodes, edges,
+        (window._ntLastData && window._ntLastData.lldp_quality) || []);
     const pnl = document.getElementById('nt-detail');
     if (!nodes.length) {
         wrap.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;'
@@ -894,7 +897,8 @@ export function render(wrap, nodes, edges, dataUrl) {
                 // waehrend der Tabellen-Reiter markiert blieb — oder rief in
                 // der Nicht-Gruppenansicht cy.nodes() auf einer zerstoerten
                 // Instanz auf.
-                if (window._ntRefreshOn === false || !window._ntCy
+                if (window._ntRefreshOn === false || window._ntCy !== cy
+                        || window._ntDragActive
                         || (window._ntCy.destroyed && window._ntCy.destroyed())) {
                     return;
                 }
@@ -909,7 +913,8 @@ export function render(wrap, nodes, edges, dataUrl) {
                 // strukturell ändern, In-Place-Update wäre fragil)
                 let inGroupView = false;
                 try { inGroupView = localStorage.getItem(NT_GROUP_VIEW_KEY) === '1'; } catch (e) {}
-                if (inGroupView) {
+                if (inGroupView || topologySignature(data.nodes, data.edges || [],
+                        data.lldp_quality || []) !== refreshSignature) {
                     render(wrap, data.nodes.slice(), (data.edges || []).slice(), dataUrl);
                     return;
                 }
@@ -923,6 +928,8 @@ export function render(wrap, nodes, edges, dataUrl) {
                     node.data('memory', u.memory);
                     node.data('ping', u.ping);
                     node.data('traffic', u.traffic);
+                    if ('iface_health' in u) node.data('iface_health', u.iface_health);
+                    if ('link_speed' in u) node.data('link_speed', u.link_speed);
                     if (u.problems !== undefined) node.data('problems', u.problems);
                     // Defensive: nur überschreiben wenn der Refresh die Felder
                     // tatsächlich liefert. Sonst würde z.B. ein Backend-Hiccup
@@ -957,9 +964,16 @@ export function render(wrap, nodes, edges, dataUrl) {
                 window._ntCy && window._ntCy.edges('[id^="ml_"]').forEach(function(e) {
                     e.data('tLabel', edgeLabel(window._ntCy, e.source().id(), e.target().id()));
                 });
-                applyTrafficHeatmap(window._ntCy);
+                // Refresh the actual edge values BEFORE deriving colour,
+                // quality score and labels. Previously only _ntLastData was
+                // fresh, while Cytoscape kept the values from the last render.
+                refreshEdgeData(cy, nodes, edges, data);
+                markDisasterState(cy);
+                applyBundleView(cy);
+                applyTrafficHeatmap(cy);
+                applyPortLabels(cy);
                 // Laufende Ausfall-Simulation neu rechnen — der In-Place-
-                // Update aendert zwar keine Edges, aber der Banner-Count
+                // Update aendert die Metriken; auch der Banner-Count
                 // und die Klassen sollen den frischen Stand reflektieren.
                 if (isSimActive()) recomputeSimulation(window._ntCy);
                 // Aktive Root-Cause-Analyse mit frischen Offline-Flags neu
