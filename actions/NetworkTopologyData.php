@@ -106,6 +106,8 @@ class NetworkTopologyData extends NetworkTopologyController {
     private const SNAPSHOT_FRESH_FOR = 30;
     private const SNAPSHOT_TTL = 60;
     private const LASTVALUE_CHUNK = 200;
+    private const LASTVALUE_RECENT = 86400;
+    private array $history_full_primary = [];
 
     /**
      * Host+hops mode: upper bound for the hop distance. Mirrors MAX_HOPS in
@@ -1589,16 +1591,17 @@ class NetworkTopologyData extends NetworkTopologyController {
                 continue;
             }
 
+            $postgresql = $GLOBALS['DB']['TYPE'] === ZBX_DB_POSTGRESQL;
+            $full_primary = !$postgresql && $this->historyHasFullPrimary($table);
+            $recent = $postgresql ? null : time() - self::LASTVALUE_RECENT;
             foreach (array_chunk($type_itemids, self::LASTVALUE_CHUNK) as $chunk) {
                 $ids = array_map('intval', $chunk);
-                $res = DBselect(self::lastValueSql($table, $ids, $GLOBALS['DB']['TYPE'] === ZBX_DB_POSTGRESQL));
-                if ($res === false) {
-                    throw new \RuntimeException('Could not read topology item history.');
-                }
-                while ($row = DBfetch($res)) {
-                    $iid = (int) $row['itemid'];
-                    $last_values[$iid] = $row['value'];
-                    $last_clocks[$iid] = (int) $row['clock'];
+                $found = $this->readLastValueRows(
+                    self::lastValueSql($table, $ids, $postgresql, $recent, $full_primary), $last_values, $last_clocks);
+                if ($recent !== null && count($found) < count($ids)) {
+                    $missing = array_values(array_diff($ids, $found));
+                    $this->readLastValueRows(
+                        self::lastValueSql($table, $missing, false, null, $full_primary), $last_values, $last_clocks);
                 }
             }
         }
@@ -1606,8 +1609,39 @@ class NetworkTopologyData extends NetworkTopologyController {
         return ['values' => $last_values, 'clocks' => $last_clocks];
     }
 
+    private function readLastValueRows(string $sql, array &$values, array &$clocks): array {
+        $res = DBselect($sql);
+        if ($res === false) {
+            throw new \RuntimeException('Could not read topology item history.');
+        }
+        $found = [];
+        while ($row = DBfetch($res)) {
+            $iid = (int) $row['itemid'];
+            $values[$iid] = $row['value'];
+            $clocks[$iid] = (int) $row['clock'];
+            $found[] = $iid;
+        }
+        return $found;
+    }
+
+    private function historyHasFullPrimary(string $table): bool {
+        if (!array_key_exists($table, $this->history_full_primary)) {
+            $primary = [];
+            $rows = DBselect("SHOW INDEX FROM " . $table . " WHERE Key_name='PRIMARY'");
+            if ($rows !== false) {
+                while ($row = DBfetch($rows)) {
+                    $primary[(int) $row['Seq_in_index']] = $row['Column_name'];
+                }
+            }
+            $this->history_full_primary[$table] = ($primary[1] ?? '') === 'itemid'
+                && ($primary[2] ?? '') === 'clock' && ($primary[3] ?? '') === 'ns';
+        }
+        return $this->history_full_primary[$table];
+    }
+
     /** Table is selected from the history table allowlist; IDs are integers. */
-    private static function lastValueSql(string $table, array $ids, bool $postgresql): string {
+    private static function lastValueSql(string $table, array $ids, bool $postgresql,
+            ?int $recent = null, bool $full_primary = false): string {
         if ($postgresql) {
             // One backwards index lookup per item. A lateral join avoids a
             // large UNION and also works on PostgreSQL history hypertables.
@@ -1617,14 +1651,21 @@ class NetworkTopologyData extends NetworkTopologyController {
                  . ' WHERE itemid=wanted.itemid ORDER BY clock DESC, ns DESC LIMIT 1) AS latest';
         }
 
+        // MySQL/MariaDB can prune daily history partitions only when the
+        // query has a clock range. First look in the most recent day. Items
+        // with no recent sample still get their latest value from any date.
+        $range = $recent === null ? '' : ' AND clock >= ' . $recent;
         $parts = [];
         foreach ($ids as $id) {
-            // Limit the ns sort to the newest second. This keeps the lookup
-            // bounded on upgraded MySQL/MariaDB schemas indexed by itemid and
-            // clock without ns, as well as schemas with the full primary key.
-            $parts[] = '(SELECT itemid, value, clock FROM ' . $table
-                     . ' WHERE itemid=' . $id
-                     . ' AND clock=(SELECT clock FROM ' . $table . ' WHERE itemid=' . $id
+            $prefix = 'SELECT itemid, value, clock FROM ' . $table . ' WHERE itemid=' . $id;
+            if ($full_primary) {
+                $parts[] = '(' . $prefix . $range . ' ORDER BY clock DESC, ns DESC LIMIT 1)';
+                continue;
+            }
+            // Old schemas can have an index on (itemid, clock) without ns.
+            // Sort by ns only within the newest second for those tables.
+            $parts[] = '(' . $prefix . $range
+                     . ' AND clock=(SELECT clock FROM ' . $table . ' WHERE itemid=' . $id . $range
                      . ' ORDER BY clock DESC LIMIT 1) ORDER BY ns DESC LIMIT 1)';
         }
         return implode(' UNION ALL ', $parts);
