@@ -1227,6 +1227,33 @@ if (sevg) {
     pruefe('Geist schlaegt eine gesetzte Severity', sevg.geistSev, sevg.konst);
 }
 
+for (const savedLevel of [0, 5]) {
+    const restored = szenario('saved-severity-' + savedLevel, { lang: 'en_US' }, `
+        const dom = miniDom();
+        globalThis.document = dom.document;
+        const key = 'nt_sev_filter';
+        localStorage.setItem(key, JSON.stringify([${savedLevel}]));
+        const S = await import(${JSON.stringify(MODULE('sev-filter.js'))});
+        const host = {
+            display: 'element',
+            data: (key) => key === 'severity' ? 0 : undefined,
+            visible() { return this.display !== 'none'; },
+            style(key, value) { if (key === 'display') this.display = value; },
+        };
+        const cy = { nodes: () => [host], edges: () => [] };
+        S.buildSevFilter(dom.el('div'), cy);
+        const initial = { visible: host.visible(), saved: JSON.parse(localStorage.getItem(key)) };
+        S.setSevLevels(cy, [5]);
+        S.buildSevFilter(dom.el('div'), cy);
+        console.log(JSON.stringify({ initial, explicit: host.visible() }));
+    `);
+    if (restored) {
+        pruefe('Saved filter leaves a node visible', restored.initial.visible, true);
+        pruefe('Only an unmatched saved filter is cleared', restored.initial.saved, savedLevel === 0 ? [0] : []);
+        pruefe('Explicit filter remains active on re-render', restored.explicit, false);
+    }
+}
+
 // GEISTER IN DER TABELLE. Der eigentliche Fall hinter "an welchem Port haengt
 // das Ding": gerade die interessanten Geraete sind keine Zabbix-Hosts. Geprueft
 // wird die ganze Kette — injectGhostNodes baut Knoten und Kante aus den

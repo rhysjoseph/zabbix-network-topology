@@ -35,6 +35,7 @@ export function filterSchluessel(n) {
 
 // Modul-State: Set<number> der aktiven Severity-Levels (plus SEV_GHOST).
 const _sevFilter = loadSevFilter();
+let _restoringSevFilter = true;
 // Modul-State: Toggle "nur offline-Hosts zeigen". Persistiert NICHT in
 // localStorage — das ist eher ein Ad-hoc-Filter ("zeig mir gerade die
 // Toten") als eine Dauer-Praeferenz.
@@ -136,6 +137,17 @@ export function activeSevLevels() {
 
 export function buildSevFilter(bar, cy) {
     if (document.getElementById('nt-sev-filter')) return;
+    if (_restoringSevFilter) {
+        _restoringSevFilter = false;
+        if (_sevFilter.size > 0) {
+            // A saved filter from another map can hide every node on startup.
+            const nodes = cy.nodes('[!isGroup]').filter(function(n) { return n.visible(); });
+            if (nodes.length > 0 && !nodes.some(function(n) { return _sevFilter.has(filterSchluessel(n)); })) {
+                _sevFilter.clear();
+                saveSevFilter(_sevFilter);
+            }
+        }
+    }
     const wrap = document.createElement('div');
     wrap.id = 'nt-sev-filter';
     wrap.style.cssText = 'display:flex;align-items:center;gap:5px;margin-left:10px;'
