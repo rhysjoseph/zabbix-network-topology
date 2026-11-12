@@ -1615,10 +1615,19 @@ class NetworkTopologyData extends NetworkTopologyController {
             throw new \RuntimeException('Could not read topology item history.');
         }
         $found = [];
-        while ($row = DBfetch($res)) {
+        while ($row = DBfetch($res, false)) {
             $iid = (int) $row['itemid'];
-            $values[$iid] = $row['value'];
-            $clocks[$iid] = (int) $row['clock'];
+            if (array_key_exists('latest', $row)) {
+                if ($row['latest'] === null) {
+                    continue;
+                }
+                [$clock, $value] = explode(':', $row['latest'], 2);
+            } else {
+                $clock = $row['clock'];
+                $value = $row['value'];
+            }
+            $values[$iid] = $value;
+            $clocks[$iid] = (int) $clock;
             $found[] = $iid;
         }
         return $found;
@@ -1655,13 +1664,20 @@ class NetworkTopologyData extends NetworkTopologyController {
         // query has a clock range. First look in the most recent day. Items
         // with no recent sample still get their latest value from any date.
         $range = $recent === null ? '' : ' AND clock >= ' . $recent;
+        if ($full_primary) {
+            // Use one correlated lookup plan for all IDs. A UNION of separate
+            // history SELECTs repeats index/partition planning for every item.
+            // Pack the clock and value together so each ID needs one lookup.
+            $wanted = implode(' UNION ALL ', array_map(
+                static fn(int $id): string => 'SELECT ' . $id . ' AS itemid', $ids));
+            return "SELECT wanted.itemid, (SELECT CONCAT(clock, ':', value) FROM " . $table
+                 . ' WHERE itemid=wanted.itemid' . $range
+                 . ' ORDER BY clock DESC, ns DESC LIMIT 1) AS latest FROM (' . $wanted . ') wanted';
+        }
+
         $parts = [];
         foreach ($ids as $id) {
             $prefix = 'SELECT itemid, value, clock FROM ' . $table . ' WHERE itemid=' . $id;
-            if ($full_primary) {
-                $parts[] = '(' . $prefix . $range . ' ORDER BY clock DESC, ns DESC LIMIT 1)';
-                continue;
-            }
             // Old schemas can have an index on (itemid, clock) without ns.
             // Sort by ns only within the newest second for those tables.
             $parts[] = '(' . $prefix . $range
