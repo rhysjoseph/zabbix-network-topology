@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh the older values used by the Zabbix topology map
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=5min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

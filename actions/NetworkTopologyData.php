@@ -22,6 +22,8 @@ use CControllerResponseFatal;
 use API;
 use Manager;
 
+require_once __DIR__ . '/NtPreparedHistory.php';
+
 class NetworkTopologyData extends NetworkTopologyController {
 
     /**
@@ -99,6 +101,113 @@ class NetworkTopologyData extends NetworkTopologyController {
         'mndp', 'uplink.id',
     ];
 
+    public const HISTORY_ITEM_KEYS = [
+        // Traffic — Agent + SNMP
+        'net.if', 'ifInOctets', 'ifOutOctets', 'ifHCInOctets', 'ifHCOutOctets',
+        // Interface-Health: oper-/admin-status + errors + discards
+        // (SNMP IF-MIB, moderne net.if.*-Template-Keys enthalten die
+        // MIB-Namen im Bracket und matchen ueber dieselben Substrings,
+        // Agent-Varianten net.if.*[*,errors|dropped] via Regex unten)
+        'ifOperStatus', 'ifAdminStatus', 'ifInErrors', 'ifOutErrors',
+        'ifInDiscards', 'ifOutDiscards',
+        // Link-Kapazitaet fuer den Weathermap-Modus (ifSpeed = bps
+        // 32bit, ifHighSpeed = Mbps 64bit; matcht auch die modernen
+        // net.if.speed[ifHighSpeed.X]-Template-Keys via Substring)
+        'ifHighSpeed', 'ifSpeed',
+        // Link-Uptime: wann das Interface zuletzt wechselte
+        // (ifLastChange) und seit wann das Geraet laeuft
+        // (sysUpTime). Opportunistisch — nur wo ein Template
+        // sie sammelt, sonst bleibt die Uptime im Panel leer.
+        'ifLastChange', 'sysUpTime',
+        // STP-Portzustand (NT Spanning-Tree by SNMP Template):
+        // nt.if.stp[ifIndex] = dot1dStpPortState. Markiert per STP
+        // geblockte Redundanzlinks gegenueber aktiven Pfaden.
+        // nt.stp.topchanges = Topology-Change-Rate (Loop-Fruehwarnung).
+        // nt.if.bcast[ifIndex] = Broadcast-Paketrate je Port (Storm, 3b).
+        // nt.mac.flap = MACs mit Portwechsel (Trapper, MAC-Flap, 3c).
+        'nt.if.stp', 'nt.stp.topchanges', 'nt.if.bcast', 'nt.mac.flap',
+        // VLAN-Tabellen (NT VLAN by SNMP): EIN Walk-Text, den
+        // MetricExtractor per VlanParser in die VLAN-Mitgliedschaft
+        // je Host zerlegt (VLAN-Filter: Knoten + Kanten, 3.5b).
+        'nt.vlan.walk',
+        // #31 lokale LLDP-Port-Tabelle (NT LLDP Local Ports by SNMP):
+        // EIN Walk-Text (lldpLocPortId/-Subtype/-Desc), den
+        // MetricExtractor per LldpLocalPortParser zerlegt. Loest den
+        // echten ifIndex des lokalen Ports auf, wo lldpRemLocalPortNum
+        // != ifIndex ist (Arista EOS / Mellanox Onyx / Cumulus).
+        'nt.lldp.locports',
+        // EIGEN-MAC des Hosts (lldpLocChassisId / dot1dBaseBridgeAddress,
+        // NT LLDP Neighbors by SNMP): nt.self.chassis / nt.self.basemac.
+        // Loest einen Nachbarn auf, der den Host nur per MAC nennt
+        // (Cisco CDP device-id = MAC, LLDP-Name leer).
+        'nt.self.',
+        // UniFi-Ports (Vorlage „UniFi Network API – Device"): die
+        // Portliste kommt als eigene port.<feld>[<idx>]-Items statt per
+        // SNMP. port.state speist die Oper/Admin-Korrelation (Knoten-
+        // Health), port.speed den Auslastungs-Divisor — beides in
+        // MetricExtractor §3f. Die Topologie-Kante kommt schon ueber
+        // uplink.id (in EDGE_NAME_KEYS). Kein Per-Port-Traffic (API
+        // liefert keins), darum nur state/speed hier. uplink.rx/tx ist
+        // der geraeteweite Uplink-Durchsatz -> an die uplink.id-Kante.
+        'port.state', 'port.speed', 'uplink.rx', 'uplink.tx',
+        // WLAN je UniFi-AP: Kanal/Standard/Breite aus der Integration-
+        // API (radio.*), Client-Zahl (wlan.clients) und Funkauslastung
+        // (wlan.cu[<band>]) aus der klassischen Controller-API — beide
+        // seit 5.5.83 Items am AP-Host selbst (kein IP-Join mehr).
+        'radio.channel', 'radio.standard', 'radio.channelWidth',
+        'radios.txRestries',
+        'wlan.clients', 'wlan.cu', 'wlan.ssids', 'wlan.satisfaction',
+        // Interface-NAMEN. Ohne sie heisst der Port "9" statt
+        // "Gi1/0/9" — und die Normalisierung, die der Gegenseite
+        // Messwerte verschafft, hat nichts zu vergleichen.
+        //
+        // Sie fehlten hier, obwohl MetricExtractor sie seit 5.3
+        // auswertet und LLDP-SETUP.md sie als Funktion beschreibt.
+        // Der Zweig war also erreichbar, aber die Items kamen nie
+        // an: eine dokumentierte Funktion, die nie laufen konnte.
+        'ifName', 'ifDescr', 'ifAlias',
+        // Alle Schluessel, die einen Nachbarn BENENNEN — geteilt
+        // mit hopScope(), damit beide nicht wieder auseinander-
+        // laufen. Darin auch uplink.id und mndp.
+        ...self::EDGE_NAME_KEYS,
+        // LLDP (IEEE 802.1AB standard MIB)
+        //
+        // 'lldpRemPort' MUSS hier stehen, nicht nur 'lldpRemSysName':
+        // die Suche ist eine Substring-Suche, und lldpRemPortId /
+        // lldpRemPortDesc enthalten "lldpRemSysName" natuerlich nicht.
+        // Sie wurden deshalb NIE geholt — der MetricExtractor hat
+        // Zweige dafuer, LldpEdgeBuilder wertet sie aus, und beides
+        // lief ins Leere, weil die Items nie ankamen. Damit konnten die
+        // Port-zu-Port-Labels nicht funktionieren, obwohl README und
+        // LLDP-SETUP sie als Hauptmerkmal fuehren und das Template die
+        // Werte einsammelt.
+        'lldpRemPort',
+        // Zusatzangaben ueber den Nachbarn — zahlen vor allem auf die
+        // NICHT ueberwachten ein, ueber die sonst nur der Name bekannt ist.
+        'lldpRemSysDesc', 'lldpRemSysCapEnabled', 'lldpRemChassisId',
+        // CDP (Cisco Discovery Protocol, Cisco-spezifisch)
+        //
+        // cdpCacheDevicePort traf 'cdpCacheDeviceId' ebenfalls nicht —
+        // dieselbe Luecke auf der CDP-Seite.
+        'cdpCacheDevicePort',
+        // CPU — Agent + SNMP variants, plus UniFi (cpu.utilization)
+        'system.cpu.util', 'hrProcessorLoad', 'ssCpuUser', 'ssCpuSystem',
+        'synoSystem.ssCpuIdle', 'cpu.utilization',
+        // Windows: die Zabbix-Vorlage liefert "CPU utilization" als
+        // perf_counter auf \Processor(_Total)\% Processor Time — KEIN
+        // system.cpu.util. MetricExtractor klassifiziert den Key
+        // laengst, nur die Suche holte ihn nicht, also stand CPU auf
+        // "nicht erhoben" waehrend Memory (vm.memory.size) durchkam.
+        // "Processor Time" ist eng: trifft nicht Queue Length / User /
+        // Privileged Time.
+        'Processor Time',
+        // Memory — Agent + SNMP HOST-RESOURCES-MIB, plus UniFi
+        'vm.memory.size', 'hrStorageUsed', 'hrStorageSize', 'hrStorageType',
+        'memory.utilization',
+        // Ping
+        'icmppingsec',
+    ];
+
     private const MAX_GROUPS = 100;
 
     // Refresh before the snapshot expires. The hard TTL preserves the old
@@ -108,6 +217,8 @@ class NetworkTopologyData extends NetworkTopologyController {
     private const LASTVALUE_CHUNK = 200;
     private const LASTVALUE_RECENT = 86400;
     private array $history_full_primary = [];
+    private array $history_partitions = [];
+    private ?NtPreparedHistory $prepared_history = null;
 
     /**
      * Host+hops mode: upper bound for the hop distance. Mirrors MAX_HOPS in
@@ -564,112 +675,7 @@ class NetworkTopologyData extends NetworkTopologyController {
                 // ist eine andere, kleine Abfrage fuer die Tooltip-Items.
                 'output'       => ['itemid', 'hostid', 'key_', 'value_type'],
                 'hostids'      => $chunk_hostids,
-                    'search'       => ['key_' => [
-                    // Traffic — Agent + SNMP
-                    'net.if', 'ifInOctets', 'ifOutOctets', 'ifHCInOctets', 'ifHCOutOctets',
-                    // Interface-Health: oper-/admin-status + errors + discards
-                    // (SNMP IF-MIB, moderne net.if.*-Template-Keys enthalten die
-                    // MIB-Namen im Bracket und matchen ueber dieselben Substrings,
-                    // Agent-Varianten net.if.*[*,errors|dropped] via Regex unten)
-                    'ifOperStatus', 'ifAdminStatus', 'ifInErrors', 'ifOutErrors',
-                    'ifInDiscards', 'ifOutDiscards',
-                    // Link-Kapazitaet fuer den Weathermap-Modus (ifSpeed = bps
-                    // 32bit, ifHighSpeed = Mbps 64bit; matcht auch die modernen
-                    // net.if.speed[ifHighSpeed.X]-Template-Keys via Substring)
-                    'ifHighSpeed', 'ifSpeed',
-                    // Link-Uptime: wann das Interface zuletzt wechselte
-                    // (ifLastChange) und seit wann das Geraet laeuft
-                    // (sysUpTime). Opportunistisch — nur wo ein Template
-                    // sie sammelt, sonst bleibt die Uptime im Panel leer.
-                    'ifLastChange', 'sysUpTime',
-                    // STP-Portzustand (NT Spanning-Tree by SNMP Template):
-                    // nt.if.stp[ifIndex] = dot1dStpPortState. Markiert per STP
-                    // geblockte Redundanzlinks gegenueber aktiven Pfaden.
-                    // nt.stp.topchanges = Topology-Change-Rate (Loop-Fruehwarnung).
-                    // nt.if.bcast[ifIndex] = Broadcast-Paketrate je Port (Storm, 3b).
-                    // nt.mac.flap = MACs mit Portwechsel (Trapper, MAC-Flap, 3c).
-                    'nt.if.stp', 'nt.stp.topchanges', 'nt.if.bcast', 'nt.mac.flap',
-                    // VLAN-Tabellen (NT VLAN by SNMP): EIN Walk-Text, den
-                    // MetricExtractor per VlanParser in die VLAN-Mitgliedschaft
-                    // je Host zerlegt (VLAN-Filter: Knoten + Kanten, 3.5b).
-                    'nt.vlan.walk',
-                    // #31 lokale LLDP-Port-Tabelle (NT LLDP Local Ports by SNMP):
-                    // EIN Walk-Text (lldpLocPortId/-Subtype/-Desc), den
-                    // MetricExtractor per LldpLocalPortParser zerlegt. Loest den
-                    // echten ifIndex des lokalen Ports auf, wo lldpRemLocalPortNum
-                    // != ifIndex ist (Arista EOS / Mellanox Onyx / Cumulus).
-                    'nt.lldp.locports',
-                    // EIGEN-MAC des Hosts (lldpLocChassisId / dot1dBaseBridgeAddress,
-                    // NT LLDP Neighbors by SNMP): nt.self.chassis / nt.self.basemac.
-                    // Loest einen Nachbarn auf, der den Host nur per MAC nennt
-                    // (Cisco CDP device-id = MAC, LLDP-Name leer).
-                    'nt.self.',
-                    // UniFi-Ports (Vorlage „UniFi Network API – Device"): die
-                    // Portliste kommt als eigene port.<feld>[<idx>]-Items statt per
-                    // SNMP. port.state speist die Oper/Admin-Korrelation (Knoten-
-                    // Health), port.speed den Auslastungs-Divisor — beides in
-                    // MetricExtractor §3f. Die Topologie-Kante kommt schon ueber
-                    // uplink.id (in EDGE_NAME_KEYS). Kein Per-Port-Traffic (API
-                    // liefert keins), darum nur state/speed hier. uplink.rx/tx ist
-                    // der geraeteweite Uplink-Durchsatz -> an die uplink.id-Kante.
-                    'port.state', 'port.speed', 'uplink.rx', 'uplink.tx',
-                    // WLAN je UniFi-AP: Kanal/Standard/Breite aus der Integration-
-                    // API (radio.*), Client-Zahl (wlan.clients) und Funkauslastung
-                    // (wlan.cu[<band>]) aus der klassischen Controller-API — beide
-                    // seit 5.5.83 Items am AP-Host selbst (kein IP-Join mehr).
-                    'radio.channel', 'radio.standard', 'radio.channelWidth',
-                    'radios.txRestries',
-                    'wlan.clients', 'wlan.cu', 'wlan.ssids', 'wlan.satisfaction',
-                    // Interface-NAMEN. Ohne sie heisst der Port "9" statt
-                    // "Gi1/0/9" — und die Normalisierung, die der Gegenseite
-                    // Messwerte verschafft, hat nichts zu vergleichen.
-                    //
-                    // Sie fehlten hier, obwohl MetricExtractor sie seit 5.3
-                    // auswertet und LLDP-SETUP.md sie als Funktion beschreibt.
-                    // Der Zweig war also erreichbar, aber die Items kamen nie
-                    // an: eine dokumentierte Funktion, die nie laufen konnte.
-                    'ifName', 'ifDescr', 'ifAlias',
-                    // Alle Schluessel, die einen Nachbarn BENENNEN — geteilt
-                    // mit hopScope(), damit beide nicht wieder auseinander-
-                    // laufen. Darin auch uplink.id und mndp.
-                    ...self::EDGE_NAME_KEYS,
-                    // LLDP (IEEE 802.1AB standard MIB)
-                    //
-                    // 'lldpRemPort' MUSS hier stehen, nicht nur 'lldpRemSysName':
-                    // die Suche ist eine Substring-Suche, und lldpRemPortId /
-                    // lldpRemPortDesc enthalten "lldpRemSysName" natuerlich nicht.
-                    // Sie wurden deshalb NIE geholt — der MetricExtractor hat
-                    // Zweige dafuer, LldpEdgeBuilder wertet sie aus, und beides
-                    // lief ins Leere, weil die Items nie ankamen. Damit konnten die
-                    // Port-zu-Port-Labels nicht funktionieren, obwohl README und
-                    // LLDP-SETUP sie als Hauptmerkmal fuehren und das Template die
-                    // Werte einsammelt.
-                    'lldpRemPort',
-                    // Zusatzangaben ueber den Nachbarn — zahlen vor allem auf die
-                    // NICHT ueberwachten ein, ueber die sonst nur der Name bekannt ist.
-                    'lldpRemSysDesc', 'lldpRemSysCapEnabled', 'lldpRemChassisId',
-                    // CDP (Cisco Discovery Protocol, Cisco-spezifisch)
-                    //
-                    // cdpCacheDevicePort traf 'cdpCacheDeviceId' ebenfalls nicht —
-                    // dieselbe Luecke auf der CDP-Seite.
-                    'cdpCacheDevicePort',
-                    // CPU — Agent + SNMP variants, plus UniFi (cpu.utilization)
-                    'system.cpu.util', 'hrProcessorLoad', 'ssCpuUser', 'ssCpuSystem',
-                    'synoSystem.ssCpuIdle', 'cpu.utilization',
-                    // Windows: die Zabbix-Vorlage liefert "CPU utilization" als
-                    // perf_counter auf \Processor(_Total)\% Processor Time — KEIN
-                    // system.cpu.util. MetricExtractor klassifiziert den Key
-                    // laengst, nur die Suche holte ihn nicht, also stand CPU auf
-                    // "nicht erhoben" waehrend Memory (vm.memory.size) durchkam.
-                    // "Processor Time" ist eng: trifft nicht Queue Length / User /
-                    // Privileged Time.
-                    'Processor Time',
-                    // Memory — Agent + SNMP HOST-RESOURCES-MIB, plus UniFi
-                    'vm.memory.size', 'hrStorageUsed', 'hrStorageSize', 'hrStorageType',
-                    'memory.utilization',
-                    // Ping
-                    'icmppingsec',
-                ]],
+                    'search'       => ['key_' => self::HISTORY_ITEM_KEYS],
                 'searchByAny'  => true,
                 'monitored'    => true,
                 'preservekeys' => true
@@ -1593,6 +1599,11 @@ class NetworkTopologyData extends NetworkTopologyController {
 
             $postgresql = $GLOBALS['DB']['TYPE'] === ZBX_DB_POSTGRESQL;
             $full_primary = !$postgresql && $this->historyHasFullPrimary($table);
+            $partitions = $full_primary ? $this->historyClockPartitions($table) : [];
+            if ($partitions) {
+                $this->readPartitionedLastValues($table, $type_itemids, $partitions, $last_values, $last_clocks);
+                continue;
+            }
             $recent = $postgresql ? null : time() - self::LASTVALUE_RECENT;
             foreach (array_chunk($type_itemids, self::LASTVALUE_CHUNK) as $chunk) {
                 $ids = array_map('intval', $chunk);
@@ -1631,6 +1642,56 @@ class NetworkTopologyData extends NetworkTopologyController {
             $found[] = $iid;
         }
         return $found;
+    }
+
+    private function historyClockPartitions(string $table): array {
+        if (!array_key_exists($table, $this->history_partitions)) {
+            $res = DBselect(NtPreparedHistory::partitionSql($table));
+            $rows = [];
+            if ($res !== false) {
+                while ($row = DBfetch($res, false)) {
+                    $rows[] = $row;
+                }
+            }
+            $this->history_partitions[$table] = NtPreparedHistory::parsePartitions($rows);
+        }
+        return $this->history_partitions[$table];
+    }
+
+    private function readPartitionedLastValues(string $table, array $ids, array $partitions,
+            array &$values, array &$clocks): void {
+        $missing = array_fill_keys(array_map('intval', $ids), true);
+        ksort($missing, SORT_NUMERIC);
+        $prepared = $this->prepared_history ??= new NtPreparedHistory();
+        $cutoff = $prepared->cutoff($table, $partitions);
+        foreach ($partitions as $partition => $end) {
+            if ($cutoff !== null && $end !== null && $end <= $cutoff) {
+                $prepared->fill($table, $partitions, $missing, $values, $clocks);
+                $cutoff = null;
+            }
+            if (!$missing) {
+                break;
+            }
+            $source = $table . ' PARTITION (' . $partition . ')';
+            $res = DBselect('SELECT itemid FROM ' . $source . ' LIMIT 1');
+            if ($res === false) {
+                throw new \RuntimeException('Could not read topology history partition.');
+            }
+            $has_data = DBfetch($res) !== false;
+            // Consume the single-row cursor even when the partition is populated.
+            if ($has_data) {
+                DBfetch($res);
+            } else {
+                continue;
+            }
+            foreach (array_chunk(array_keys($missing), 500) as $chunk) {
+                $found = $this->readLastValueRows(
+                    self::lastValueSql($source, $chunk, false, null, true), $values, $clocks);
+                foreach ($found as $id) {
+                    unset($missing[$id]);
+                }
+            }
+        }
     }
 
     private function historyHasFullPrimary(string $table): bool {
