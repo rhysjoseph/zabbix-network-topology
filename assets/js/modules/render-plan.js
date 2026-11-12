@@ -397,9 +397,7 @@ export function renderPlan(wrap, nodes, edges, dataUrl) {
     // Vorherigen Tab-State aufraeumen (wie renderGeo).
     if (window._ntCy)         { try { window._ntCy.destroy(); } catch (e) {} window._ntCy = null; }
     if (window._ntEdgeAnim)   { clearInterval(window._ntEdgeAnim);     window._ntEdgeAnim     = null; }
-    if (window._ntRefreshTimer) { clearInterval(window._ntRefreshTimer); window._ntRefreshTimer = null; }
     if (window._ntMinimapTimer) { clearInterval(window._ntMinimapTimer); window._ntMinimapTimer = null; }
-    if (window._ntGeoRefreshTimer) { clearInterval(window._ntGeoRefreshTimer); window._ntGeoRefreshTimer = null; }
     cleanupPlan();
     window._ntToolbarDone = false;
 

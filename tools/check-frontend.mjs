@@ -1460,6 +1460,59 @@ if (fehlerfall) {
     pruefe('X-Requested-With auch ohne Optionen', fehlerfall.kopf, 'XMLHttpRequest');
 }
 
+// A redraw can replace the timer while a slow request is still in flight.
+console.log('\n  Topology refresh while a request is pending\n');
+const refreshQueue = szenario('topology-refresh', { lang: 'en_US' }, `
+    const Q = await import(${JSON.stringify(MODULE('topology-refresh.js'))});
+    const timers = new Map();
+    let nextTimer = 0;
+    globalThis.setTimeout = (fn, delay) => {
+        timers.set(++nextTimer, {fn, delay});
+        return nextTimer;
+    };
+    globalThis.clearTimeout = id => timers.delete(id);
+    const tick = () => {
+        const [id, timer] = timers.entries().next().value;
+        timers.delete(id);
+        return timer.fn();
+    };
+    let requests = 0;
+    let respond;
+    globalThis.fetch = () => {
+        requests++;
+        return new Promise(resolve => {
+            respond = data => resolve({ok: true, text: async () => JSON.stringify(data)});
+        });
+    };
+    const applied = [];
+    Q.startTopologyRefresh('topology', 30000, () => true, () => applied.push('old'));
+    const old = tick();
+    const timersWhileBusy = timers.size;
+    Q.startTopologyRefresh('topology', 30000, () => true, () => applied.push('new'));
+    const current = tick();
+    respond({retry_after: 3});
+    await Promise.all([old, current]);
+    const nextDelay = timers.values().next().value.delay;
+    Q.stopTopologyRefresh();
+
+    Q.acceptTopologySnapshot({snapshot_at: 10, nodes: [{id: 10}]}, 'topology');
+    Q.acceptTopologySnapshot({snapshot_at: 9, nodes: [{id: 9}]}, 'topology');
+    Q.acceptTopologySnapshot({retry_after: 3}, 'topology');
+
+    console.log(JSON.stringify({
+        requests, timersWhileBusy, applied, nextDelay, stopped: timers.size === 0,
+        keptSnapshot: window._ntLastData.nodes[0].id === 10
+    }));
+`);
+if (refreshQueue) {
+    pruefe('a slow request leaves no scheduled poll', refreshQueue.timersWhileBusy, 0);
+    pruefe('two renders share the in-flight request', refreshQueue.requests, 1);
+    pruefe('only the active render handles the response', refreshQueue.applied, ['new']);
+    pruefe('pending responses retry with jitter', refreshQueue.nextDelay >= 3000 && refreshQueue.nextDelay < 4000, true);
+    pruefe('leaving the view cancels the next poll', refreshQueue.stopped, true);
+    pruefe('older and pending responses keep the displayed snapshot', refreshQueue.keptSnapshot, true);
+}
+
 // Die Aufschrift des Einklapp-Knopfs ist das EINZIGE, woran sich der Zustand
 // ablesen laesst — die Karte selbst sieht eingeklappt genauso aus wie eine
 // kleine Karte. Bei tausend Geraeten stand dort "off (921)", waehrend genau

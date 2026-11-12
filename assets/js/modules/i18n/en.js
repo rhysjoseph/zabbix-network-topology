@@ -663,6 +663,7 @@ export default {
     'tip.health.hosts': 'both hosts:',
     'tip.host_total': 'host total (both ends)',
     'app.pick_groups': '← Please select host groups (or a host + hops) and click Apply.',
+    'app.snapshot_stale': 'Refreshing · last snapshot at {time}',
     'app.loading': 'Loading topology...',
     'app.error': 'Error: {msg}',
     'http.timeout': 'The server did not answer in time (HTTP {status}). The request was probably too large — try fewer hops or fewer host groups. The web server error log has the details.',

@@ -21,7 +21,7 @@ import { esc, clearWrap } from './utils.js';
 import { loadGeoProvider, saveGeoProvider } from './storage.js';
 import { GEO_PROVIDERS, getProvider } from './geo-providers.js';
 import { t } from './i18n.js';
-import { fetchJson } from './http.js';
+import { acceptTopologySnapshot, showSnapshotStatus, startTopologyRefresh } from './topology-refresh.js';
 import { buildMarkerIcon, buildPopup, drawEdges, ensureLeaflet } from './geo-markers.js';
 
 let _map         = null;   // Leaflet-Map-Instance
@@ -101,10 +101,6 @@ function rebuildMarkersAndEdges(geoNodes, edges) {
 // gehefteten Event-Listener auf, damit kein Memory-Leak entsteht.
 // Wird aus tabs.js / switchTab beim Wechsel aufgerufen.
 export function cleanupGeo() {
-    if (window._ntGeoRefreshTimer) {
-        clearInterval(window._ntGeoRefreshTimer);
-        window._ntGeoRefreshTimer = null;
-    }
     if (_map) {
         try { _map.remove(); } catch (e) {}
         _map = null;
@@ -118,9 +114,8 @@ export function renderGeo(wrap, nodes, edges, dataUrl) {
     // Aufräumen vorheriger Tab-State (inklusive eigene Karte falls vorhanden)
     if (window._ntCy)         { try { window._ntCy.destroy(); } catch (e) {} window._ntCy = null; }
     if (window._ntEdgeAnim)   { clearInterval(window._ntEdgeAnim);     window._ntEdgeAnim     = null; }
-    if (window._ntRefreshTimer) { clearInterval(window._ntRefreshTimer); window._ntRefreshTimer = null; }
     if (window._ntMinimapTimer) { clearInterval(window._ntMinimapTimer); window._ntMinimapTimer = null; }
-    cleanupGeo();   // räumt _map, _markerLayer, _edgeLayer und Geo-Refresh-Timer auf
+    cleanupGeo();
     window._ntToolbarDone = false;
 
     // Canvas leeren (Loading-Spinner behalten)
@@ -234,31 +229,19 @@ export function renderGeo(wrap, nodes, edges, dataUrl) {
     setTimeout(function() { if (_map) _map.invalidateSize(); }, 100);
     setTimeout(function() { if (_map) _map.invalidateSize(); }, 500);
 
-    // Auto-Refresh alle 30s wenn dataUrl gesetzt ist und Auto-Refresh aktiv.
-    // Nur Marker und Edges werden neu gebaut — Karte/Zoom bleiben intakt,
-    // damit der User nicht ständig sein Pan/Zoom verliert.
-    if (dataUrl && window._ntRefreshOn !== false) {
-        window._ntGeoRefreshTimer = setInterval(function() {
-            if (window._ntRefreshOn === false || !_map) return;
-            fetchJson(dataUrl, {
-                credentials: 'same-origin',
-                headers: { 'X-Requested-With': 'XMLHttpRequest' }
-            })
-                .then(function(data) {
-                    if (!data || !data.nodes) return;
-                    window._ntLastData = window._ntLastData || {};
-                    window._ntLastData.nodes = data.nodes;
-                    window._ntLastData.edges = data.edges || [];
-                    // Hosts mit gültigen Koordinaten neu filtern
-                    const fresh = data.nodes.filter(function(n) {
-                        return typeof n.lat === 'number' && typeof n.lon === 'number'
-                            && !isNaN(n.lat) && !isNaN(n.lon);
-                    });
-                    rebuildMarkersAndEdges(fresh, data.edges || []);
-                })
-                .catch(function() { /* Network-Hiccup ignorieren */ });
-        }, 30000);
-    }
+    const map = _map;
+    startTopologyRefresh(dataUrl, 30000, function() {
+        return window._ntRefreshOn !== false && _map === map && mapDiv.isConnected;
+    }, function(data) {
+        if (!data || (!data.nodes && !data.retry_after)) return;
+        showSnapshotStatus(wrap, data, window._ntLastData && window._ntLastData.snapshot_at);
+        if (!acceptTopologySnapshot(data, dataUrl)) return;
+        const fresh = data.nodes.filter(function(n) {
+            return typeof n.lat === 'number' && typeof n.lon === 'number'
+                && !isNaN(n.lat) && !isNaN(n.lon);
+        });
+        rebuildMarkersAndEdges(fresh, data.edges || []);
+    });
     }).catch(function(err) {
         // Leaflet-Load fehlgeschlagen — sichtbare Meldung statt leerer Karte.
         if (mapDiv) mapDiv.textContent =

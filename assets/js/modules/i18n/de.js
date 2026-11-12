@@ -668,6 +668,7 @@ export default {
     'tip.health.hosts': 'beide Hosts:',
     'tip.host_total': 'Host gesamt (beide Enden)',
     'app.pick_groups': '← Bitte Host-Gruppen (oder einen Host + Hops) wählen und Apply klicken.',
+    'app.snapshot_stale': 'Aktualisierung läuft · letzter Stand um {time}',
     'app.loading': 'Lade Topologie...',
     'app.error': 'Fehler: {msg}',
     'http.timeout': 'Der Server hat nicht rechtzeitig geantwortet (HTTP {status}). Vermutlich war die Abfrage zu groß — weniger Hops oder weniger Hostgruppen wählen. Details stehen im Fehlerprotokoll des Webservers.',

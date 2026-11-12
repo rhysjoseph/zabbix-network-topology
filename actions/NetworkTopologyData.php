@@ -101,64 +101,11 @@ class NetworkTopologyData extends NetworkTopologyController {
 
     private const MAX_GROUPS = 100;
 
-    /**
-     * TTL des Response-Caches in Sekunden.
-     *
-     * Diese Action ist der teuerste Endpoint des Moduls (Host + Trigger +
-     * Problem + Item + gebatchte Lastvalues + LLDP) und war als einzige der
-     * sieben cachenden Actions ohne Response-Cache — sie hielt in NtCache nur
-     * die Topologie-Baseline.
-     *
-     * Der Client dedupliziert seit 5.0 bereits innerhalb EINER Seite (mehrere
-     * Widgets auf einem Dashboard teilen sich eine Anfrage). Das hilft aber
-     * nicht ueber Tabs, Nutzer und die Kartenansicht hinweg — genau die Faelle
-     * deckt dieser Cache ab.
-     *
-     * Hier standen 15 s, begruendet damit, dass sie "deutlich unter jedem
-     * Refresh-Intervall" liegen — Dashboard 1 min, Karte 30 s. Genau diese
-     * Praemisse gilt nicht mehr: oberhalb von 400 Knoten laeuft der
-     * Karten-Refresh seit 5.4.2 auf zwei Minuten (refreshIntervallMs in
-     * utils.js). Ein Fenster von 15 Sekunden kann dort NIE greifen, und auf
-     * dem Lasttest ist es auch nie: 0 % Trefferquote bei einem Aufruf, der
-     * 4,7 Sekunden kostet.
-     *
-     * 60 s liegen auf dem Dashboard-Default und darunter bei der kleinen
-     * Karte. Was der Cache ausliefert, sind letzte Werte, die selbst im
-     * Poll-Intervall entstehen — meist eine Minute oder mehr. Eine Minute
-     * Alter heisst also hoechstens "ein Durchgang hinterher", nicht
-     * "veraltet".
-     *
-     * Dem einzelnen Betrachter bringt das nichts, der liegt mit zwei Minuten
-     * ohnehin ausserhalb. Es greift bei MEHREREN: zweiter Tab, zweiter
-     * Nutzer, Widgets neben der Karte. Die teure Arbeit faellt dann einmal
-     * an statt dreimal.
-     */
-    private const CACHE_TTL = 60;
-
-    /**
-     * Zeitfenster fuer den schnellen Weg in fetchLastValues(), in Sekunden.
-     *
-     * Eine Stunde, und die Zahl ist gemessen, nicht gewaehlt: 15 Minuten
-     * waren gleich schnell, 2 Stunden schon langsamer, 24 Stunden
-     * langsamer als gar kein Fenster. Eine Stunde liegt am flachen Ende
-     * der Kurve und faengt zugleich Items mit stuendlichem Intervall ein,
-     * die sonst alle in den Rueckfall liefen.
-     *
-     * Wer sie vergroessert, macht den schnellen Weg langsamer UND spart
-     * nur Nachzuegler, die ohnehin billig sind. Wer sie verkleinert, spart
-     * fast nichts und schiebt mehr in den Rueckfall.
-     */
-    private const LASTVALUE_FENSTER = 3600;
-
-    /** Wie viele Itemids in ein IN(...) des Fenster-Scans gehen. */
-    private const LASTVALUE_FENSTER_CHUNK = 1000;
-
-    /**
-     * Stueckgroesse des Rueckfalls. Gemessen fast wirkungslos (13 % zwischen
-     * 20 und 300), deshalb ein Wert, der die SQL-Zeichenkette handlich
-     * haelt, statt einer, der etwas verspricht.
-     */
-    private const LASTVALUE_RUECKFALL_CHUNK = 200;
+    // Refresh before the snapshot expires. The hard TTL preserves the old
+    // permission-revocation window for this user-scoped cache.
+    private const SNAPSHOT_FRESH_FOR = 30;
+    private const SNAPSHOT_TTL = 60;
+    private const LASTVALUE_CHUNK = 200;
 
     /**
      * Host+hops mode: upper bound for the hop distance. Mirrors MAX_HOPS in
@@ -324,6 +271,7 @@ class NetworkTopologyData extends NetworkTopologyController {
         // + Problem + Item + gebatchte Lastvalues). Der Auto-Refresh macht ~1
         // Call/30s, manuelles Gruppen-Umschalten ein paar mehr — 30/10s trifft
         // legitime Nutzung nie, kappt aber ein Runaway-Skript / viele Tabs.
+        header('Cache-Control: private, no-store');
         if (!$this->throttle('data', 30, 10)) return;
         $_t0 = microtime(true);
         $this->phase_t = $_t0;
@@ -352,7 +300,7 @@ class NetworkTopologyData extends NetworkTopologyController {
             $groupids = [];
             $requested_groups = 0;
             // Own cache-key space ('host' prefix): a host scope must never
-            // collide with a groupids list in data_payload/topo_baseline.
+            // collide with a groupids list in data_snapshot/topo_baseline.
             $cache_parts = ['host', $hostid, (string) $hops];
         } else {
             if (!$groupids) {
@@ -369,26 +317,54 @@ class NetworkTopologyData extends NetworkTopologyController {
             $cache_parts = [$groupids];
         }
 
-        // Response-Cache. Der Schluessel ist user- UND gruppengebunden (das
-        // Scoping macht NtCache); ohne APCu ist der Aufruf ein No-Op und alles
-        // laeuft wie bisher.
-        //
-        // Gecacht wird nur der TEURE Teil. Bewusst NICHT im Cache:
-        //   topo_changes    beruht auf einem Diff gegen die letzte Abfrage. Aus
-        //                   dem Cache bedient, liefe der Diff nur noch bei
-        //                   Cache-Misses — dieselbe "neue Verbindung" wuerde
-        //                   fuer die Dauer der TTL wiederholt gemeldet und
-        //                   dazwischen Aenderungen verschluckt.
-        //   requested_count haengt am UNGEKUERZTEN Eingabewert, der nicht im
-        //                   Schluessel steckt: zwei Anfragen mit 150 und 100
-        //                   Gruppen teilen sich nach dem Kuerzen denselben
-        //                   Eintrag, muessen aber verschieden warnen.
-        $cached = NtCache::get('data_payload', $cache_parts);
-        if (is_array($cached)) {
-            $this->respondData($cached, $cache_parts, $requested_groups, count($groupids), $_t0, true, $scope_info);
-            return;
+        $snapshot = NtCache::get('data_snapshot', $cache_parts);
+        $lock = null;
+        if ($snapshot === null || $this->snapshotIsStale($snapshot)) {
+            $lock = NtCache::tryLock('data_snapshot', $cache_parts);
+            if ($lock === false) {
+                if ($snapshot === null || time() - $snapshot['built_at'] >= self::SNAPSHOT_TTL) {
+                    $this->jsonResponse(['retry_after' => 3, 'error' => 'Topology is being rebuilt.']);
+                    return;
+                }
+            } else {
+                // Another worker may have published between the first read and
+                // our lock acquisition. Recheck before starting a rebuild.
+                $snapshot = NtCache::get('data_snapshot', $cache_parts);
+                if ($snapshot === null || $this->snapshotIsStale($snapshot)) {
+                    try {
+                        $core = $this->buildData($groupids, $scope_hostids);
+                        $snapshot = ['built_at' => time(), 'core' => $core];
+                        $this->respondSnapshot($snapshot, $cache_parts, $requested_groups,
+                            count($groupids), $_t0, false, $scope_info);
+                        NtCache::set('data_snapshot', $cache_parts, $snapshot, self::SNAPSHOT_TTL);
+                        return;
+                    } finally {
+                        if (is_resource($lock)) {
+                            fclose($lock);
+                        }
+                    }
+                }
+                if (is_resource($lock)) {
+                    fclose($lock);
+                }
+            }
         }
 
+        $this->respondSnapshot($snapshot, $cache_parts, $requested_groups,
+            count($groupids), $_t0, true, $scope_info);
+    }
+
+    private function snapshotIsStale(array $snapshot): bool {
+        return time() - $snapshot['built_at'] >= self::SNAPSHOT_FRESH_FOR;
+    }
+
+    private function respondSnapshot(array $snapshot, array $cache_parts, int $requested_groups,
+            int $processed_groups, float $t0, bool $cache_hit, ?array $scope_info): void {
+        $this->respondData($snapshot['core'], $cache_parts, $requested_groups, $processed_groups,
+            $t0, $cache_hit, $scope_info, $snapshot['built_at'], $this->snapshotIsStale($snapshot));
+    }
+
+    private function buildData(array $groupids, array $scope_hostids): array {
         // ── 1. HOSTS ──────────────────────────────────────────────────────
         // proxyid + proxy_groupid sind seit Zabbix 7.0 verfügbar (in 6.x hieß
         // proxyid noch "proxy_hostid"). Bei Verwendung in älteren Versionen
@@ -419,7 +395,7 @@ class NetworkTopologyData extends NetworkTopologyController {
             'preservekeys'          => true
         ];
         // The only fork between the two modes: which hosts feed the pipeline.
-        if ($host_mode) {
+        if ($scope_hostids) {
             $host_query['hostids'] = $scope_hostids;
         } else {
             $host_query['groupids'] = $groupids;
@@ -427,8 +403,7 @@ class NetworkTopologyData extends NetworkTopologyController {
         $hosts = API::Host()->get($host_query);
 
         if (!$hosts) {
-            $this->jsonResponse(['nodes' => [], 'edges' => []]);
-            return;
+            return ['nodes' => [], 'edges' => []];
         }
         $hostids = array_keys($hosts);
 
@@ -1067,7 +1042,7 @@ class NetworkTopologyData extends NetworkTopologyController {
         // bedingt verschiedene Subgraphen und wuerden sich sonst gegenseitig
         // die Baseline verrollen. Der Sender-Cron (eigener Monitoring-User)
         // rollt damit unabhaengig von UI-Usern.
-        $core = [
+        return [
             'nodes'          => $nodes,
             'edges'          => $edges,
             'lldp_unmatched' => $lldp_unmatched,
@@ -1084,37 +1059,13 @@ class NetworkTopologyData extends NetworkTopologyController {
             // beim ersten Cache-Treffer, waehrend die gekappte Karte bleibt.
             'edges_truncated' => LldpEdgeBuilder::lastTruncated(),
         ];
-        NtCache::set('data_payload', $cache_parts, $core, self::CACHE_TTL);
-
-        $this->respondData($core, $cache_parts, $requested_groups, count($groupids), $_t0, false, $scope_info);
     }
 
-    /**
-     * Baut aus dem (frisch berechneten oder gecachten) Kern die Antwort.
-     *
-     * Alles, was hier passiert, muss bei JEDEM Aufruf laufen — sonst waere es
-     * im Cache besser aufgehoben. Das betrifft vor allem den Baseline-Diff:
-     * er vergleicht die aktuellen Kanten mit denen der letzten Abfrage und
-     * ergibt topo_changes. Wuerde er nur bei Cache-Misses laufen, meldete das
-     * Frontend dieselbe neue Verbindung mehrfach und verschluckte die
-     * Aenderungen dazwischen.
-     *
-     * @param array $core             nodes, edges, lldp_*, health
-     * @param array $cache_parts      cache key parts — the (truncated) group
-     *                                list, or ['host', hostid, hops] in
-     *                                host+hops mode
-     * @param int   $requested_groups Anzahl VOR dem Kuerzen (0 in host mode)
-     * @param int   $processed_groups Anzahl NACH dem Kuerzen (0 in host mode)
-     * @param float $t0               Startzeit fuer die Diagnose
-     * @param bool  $cache_hit        kam der Kern aus dem Cache?
-     * @param array|null $scope_info  host+hops mode: HopScope::cap() result,
-     *                                null in group mode. Computed on every
-     *                                call, not cached — the cached core only
-     *                                holds the capped result.
-     */
+    // Compute changes and roll the baseline only for a newly built core.
+    // Cached responses can finish after a rebuild and must never roll it back.
     private function respondData(array $core, array $cache_parts, int $requested_groups,
-            int $processed_groups, float $t0, bool $cache_hit, ?array $scope_info = null): void {
-
+            int $processed_groups, float $t0, bool $cache_hit, ?array $scope_info,
+            int $built_at, bool $snapshot_stale): void {
         $nodes = $core['nodes'] ?? [];
         $edges = $core['edges'] ?? [];
 
@@ -1198,14 +1149,16 @@ class NetworkTopologyData extends NetworkTopologyController {
             $base_arr = TopoDiff::filterByVisible($base_arr, $sichtbar);
         }
 
-        $topo_changes = TopoDiff::compare($base_arr, $current);
+        $topo_changes = TopoDiff::compare($cache_hit ? null : $base_arr, $current);
 
         // Alterung: was gerade nicht gemeldet wird, verschwindet nicht sofort
         // von der Karte, sondern altert. LLDP-Tabellen haben Aussetzer — ein
         // Neustart, eine ausgefallene Discovery, ein zu frueher Poll —, und
         // ohne diese Frist sprang die Karte bei jedem davon.
         $aged = TopoDiff::ageOut($base_arr, $current, time(), self::STALE_TTL);
-        NtCache::set('topo_baseline', $cache_parts, $aged['store'], 7 * 86400);
+        if (!$cache_hit && $nodes) {
+            NtCache::set('topo_baseline', $cache_parts, $aged['store'], 7 * 86400);
+        }
 
         // Neu aufgetauchte Kanten markieren — Gegenstueck zur Alterung.
         // Same keys as the snapshot — with parallel links "a|b" alone no
@@ -1265,7 +1218,7 @@ class NetworkTopologyData extends NetworkTopologyController {
         //
         // Die Platzierung ist nicht beliebig: HIER, nach dem Baseline-Diff und
         // ausserhalb von $core. Weiter oben wuerden die Links in den
-        // data_payload-Cache wandern (und damit auch ohne Flag ausgeliefert)
+        // data_snapshot-Cache wandern (und damit auch ohne Flag ausgeliefert)
         // und in die topo_baseline, deren Schluessel das Flag nicht enthaelt —
         // jeder Widget-Aufruf haette dann "neue Verbindung" gemeldet.
         if ((int) $this->getInput('manual_links', 0) === 1) {
@@ -1328,6 +1281,9 @@ class NetworkTopologyData extends NetworkTopologyController {
              // bestehende Top-Level-Felder bleiben unveraendert.
              'api_version'     => self::API_VERSION,
              'generated_at'    => time(),
+             'snapshot_at'     => $built_at,
+             'snapshot_stale'  => $snapshot_stale,
+             'retry_after'     => $snapshot_stale ? 3 : 0,
              'capabilities'    => $this->capabilities()]
         );
         $_mem_peak = memory_get_peak_usage(true);
@@ -1564,81 +1520,22 @@ class NetworkTopologyData extends NetworkTopologyController {
     }
 
     /**
-     * Letzte Werte fuer eine Item-Menge — Fenster-Scan mit Rueckfall.
+     * Read the newest sample per item, including items whose last sample is
+     * old. Its clock is used to detect stale interfaces and neighbours.
      *
-     * DIESE METHODE IST DER TEUERSTE TEIL DER KARTE. Auf dem Lasttest mit
-     * 1000 Geraeten traegt sie 86 % der Antwortzeit: 4017 von 4681 ms, bei
-     * 43.200 Items. Jedes Item ist genau ein Nachschlag, also entscheidet
-     * nicht die Hostzahl, sondern die Itemzahl.
-     *
-     * Vorher stand hier UNION ALL aus Unterabfragen mit je
-     * "ORDER BY clock DESC LIMIT 1". Gemessen an 6000 echten Items aus dem
-     * Lasttest, jeweils zwei Laeufe:
-     *
-     *   UNION ALL, 20 je Anweisung       456 / 499 ms
-     *   UNION ALL, 300 je Anweisung      426 / 444 ms
-     *   Fensterfunktion, 15 min            68 /  45 ms
-     *   Fensterfunktion,  1 h              64 /  61 ms
-     *   Fensterfunktion,  2 h              96 / 150 ms
-     *   Fensterfunktion, 24 h             922 / 690 ms
-     *
-     * Zwei Dinge stehen darin, und beide waren gegen die Erwartung:
-     *
-     * Die STUECKGROESSE ist fast egal — 13 % zwischen 20 und 300, im
-     * DB-Pod wie ueber das Pod-Netz gemessen. Der Rundlauf kostet hier
-     * nichts, die Indexzugriffe kosten alles. Wer hier optimieren will,
-     * muss die Zahl der Zugriffe senken, nicht die der Anweisungen.
-     *
-     * Das ZEITFENSTER ist alles. Ohne Fenster muss die Datenbank je Item
-     * den ganzen Indexbereich ansehen; mit Fenster nur den jungen Teil.
-     * Deshalb ist ein zu GROSSES Fenster schlechter als gar keins: bei 24
-     * Stunden war die Variante langsamer als der alte Weg.
-     *
-     * Ein Fenster allein waere aber falsch. Von denselben 6000 Items hatten
-     * nur 3786 ueberhaupt einen Wert darin — der Rest meldet selten, ist
-     * abgeschaltet oder hat nie geliefert. Stumm wegzulassen hiesse, dass
-     * ein stillgelegter Port aus der Karte verschwindet, statt als alt
-     * erkannt zu werden. Deshalb DANACH der alte Weg fuer genau die, die
-     * das Fenster nicht gefunden hat: 2214 Nachzuegler in 143 ms.
-     *
-     * Zusammen ~200 ms statt 435 ms fuer dieselben 6000 Items, bei
-     * unveraenderter Semantik — jedes Item bekommt denselben Wert wie
-     * vorher, nur auf einem billigeren Weg.
-     *
-     * AN DER ECHTEN KARTE nachgemessen, 1000 Geraete, 43.200 Items:
-     *
-     *            vorher                     nachher
-     *   items:last  4017 ms (86 %)   →    ~ 950 ms (58 %)
-     *   Gesamtaufruf 4681 ms         →     1581 ms
-     *
-     * Also 4,3-fach auf diesem Abschnitt und 2,9-fach auf dem ganzen
-     * Aufruf. Die Hochrechnung aus den 6000 Items hatte 1850 ms erwartet
-     * und war damit zu pessimistisch: im Grossen faellt ein groesserer
-     * Anteil ins Fenster, und der Rueckfall waechst langsamer als linear.
-     *
-     * Der teuerste Abschnitt ist seitdem nicht mehr dieser, sondern
-     * items:get mit 450 ms (26 %) — die Item-Abfrage ueber die Zabbix-API.
-     * Wer als Naechstes etwas holen will, faengt dort an.
-     *
-     * ROW_NUMBER() OVER laeuft auf allen von Zabbix 7.0 unterstuetzten
-     * Datenbanken (PostgreSQL 13+, MySQL 8.0+, MariaDB 10.5+).
-     * PostgreSQLs eigenes DISTINCT ON waere knapp schneller gewesen und
-     * steht deshalb NICHT hier.
-     *
-     * @param array $items itemid => Item (braucht 'value_type')
+     * @param array $items itemid => Item (requires value_type)
      * @return array{values: array<int, mixed>, clocks: array<int, int>}
      */
     private function fetchLastValues(array $items): array {
         $last_values = [];
         $last_clocks = [];
-        $grenze      = time() - self::LASTVALUE_FENSTER;
 
         // Zabbix 8 kann History ausserhalb von SQL speichern (HistoryProvider /
         // $HISTORY_PROVIDERS -> ClickHouse, oder seit jeher Elasticsearch). Dann
         // sind die history*-Tabellen leer und der schnelle Direkt-SQL-Scan unten
         // liefert fuer jedes Item null -> keine Metriken, keine LLDP-Kanten
         // (GitHub #26). Darum fragen wir pro value_type den konfigurierten Storage:
-        // bei SQL bleibt der schnelle Fenster-Scan, bei einem externen Provider
+        // bei SQL bleibt die direkte Abfrage, bei einem externen Provider
         // holt die Frontend-History-Abstraktion die Werte, genau wie die Zabbix-UI.
         $hm = Manager::History();
 
@@ -1672,54 +1569,12 @@ class NetworkTopologyData extends NetworkTopologyController {
                 continue;
             }
 
-            // ── Stufe 1: ein Scan ueber das Zeitfenster ───────────────────
-            $offen = [];
-            foreach (array_chunk($type_itemids, self::LASTVALUE_FENSTER_CHUNK) as $chunk) {
-                $ids = [];
-                foreach ($chunk as $iid) {
-                    $ids[] = (int) $iid;
+            foreach (array_chunk($type_itemids, self::LASTVALUE_CHUNK) as $chunk) {
+                $ids = array_map('intval', $chunk);
+                $res = DBselect(self::lastValueSql($table, $ids, $GLOBALS['DB']['TYPE'] === ZBX_DB_POSTGRESQL));
+                if ($res === false) {
+                    throw new \RuntimeException('Could not read topology item history.');
                 }
-                // value + clock beide aus demselben SELECT — die
-                // Stale-Erkennung braucht die Uhrzeit, und ein zweiter
-                // Durchgang dafuer waere die Haelfte der Ersparnis.
-                $sql = 'SELECT itemid, value, clock FROM ('
-                     . 'SELECT itemid, value, clock, ROW_NUMBER() OVER '
-                     . '(PARTITION BY itemid ORDER BY clock DESC) AS rn FROM ' . $table
-                     . ' WHERE itemid IN (' . implode(',', $ids) . ')'
-                     . ' AND clock > ' . $grenze
-                     . ') t WHERE rn = 1';
-                $res = DBselect($sql);
-                $gefunden = [];
-                while ($row = DBfetch($res)) {
-                    $iid = (int) $row['itemid'];
-                    $last_values[$iid] = $row['value'];
-                    $last_clocks[$iid] = (int) $row['clock'];
-                    $gefunden[$iid] = true;
-                }
-                foreach ($ids as $iid) {
-                    if (!isset($gefunden[$iid])) {
-                        $offen[] = $iid;
-                    }
-                }
-            }
-
-            // ── Stufe 2: der alte Weg, nur fuer die Nachzuegler ───────────
-            // Wer im Fenster nichts hatte, bekommt trotzdem seinen letzten
-            // Wert — egal wie alt. Ein Port, der seit Tagen schweigt, soll
-            // als ALT erkennbar sein und nicht verschwinden.
-            foreach (array_chunk($offen, self::LASTVALUE_RUECKFALL_CHUNK) as $chunk) {
-                $parts = [];
-                foreach ($chunk as $iid) {
-                    // Der Cast steht hier, obwohl $offen schon nur Ganzzahlen
-                    // traegt. An einer Interpolationsstelle soll die Zusicherung
-                    // LOKAL gelten und nicht davon abhaengen, was zwanzig Zeilen
-                    // weiter oben passiert — das ueberlebt den naechsten Umbau.
-                    $iid = (int) $iid;
-                    $parts[] = '(SELECT ' . $iid . ' AS itemid, value, clock FROM ' . $table
-                             . ' WHERE itemid=' . $iid
-                             . ' ORDER BY clock DESC LIMIT 1)';
-                }
-                $res = DBselect(implode(' UNION ALL ', $parts));
                 while ($row = DBfetch($res)) {
                     $iid = (int) $row['itemid'];
                     $last_values[$iid] = $row['value'];
@@ -1729,6 +1584,30 @@ class NetworkTopologyData extends NetworkTopologyController {
         }
 
         return ['values' => $last_values, 'clocks' => $last_clocks];
+    }
+
+    /** Table is selected from the history table allowlist; IDs are integers. */
+    private static function lastValueSql(string $table, array $ids, bool $postgresql): string {
+        if ($postgresql) {
+            // One backwards index lookup per item. A lateral join avoids a
+            // large UNION and also works on PostgreSQL history hypertables.
+            return 'SELECT wanted.itemid, latest.value, latest.clock'
+                 . ' FROM unnest(ARRAY[' . implode(',', $ids) . ']::bigint[]) AS wanted(itemid)'
+                 . ' CROSS JOIN LATERAL (SELECT value, clock FROM ' . $table
+                 . ' WHERE itemid=wanted.itemid ORDER BY clock DESC, ns DESC LIMIT 1) AS latest';
+        }
+
+        $parts = [];
+        foreach ($ids as $id) {
+            // Limit the ns sort to the newest second. This keeps the lookup
+            // bounded on upgraded MySQL/MariaDB schemas indexed by itemid and
+            // clock without ns, as well as schemas with the full primary key.
+            $parts[] = '(SELECT itemid, value, clock FROM ' . $table
+                     . ' WHERE itemid=' . $id
+                     . ' AND clock=(SELECT clock FROM ' . $table . ' WHERE itemid=' . $id
+                     . ' ORDER BY clock DESC LIMIT 1) ORDER BY ns DESC LIMIT 1)';
+        }
+        return implode(' UNION ALL ', $parts);
     }
 
     /**

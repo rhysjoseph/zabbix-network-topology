@@ -55,7 +55,7 @@ import { injectInternetCloud, injectGhostNodes, buildNodeElements, buildEdgeElem
 import { isFocusActive, filterToFocus, dropFocus, renderFocusBanner } from './focus-mode.js';
 import { initClientFocus, revealClientsOf, hideAllClients, isClientNode } from './client-focus.js';
 import { toast, toastTruncatedOnce } from './toast.js';
-import { fetchJson } from './http.js';
+import { acceptTopologySnapshot, showSnapshotStatus, startTopologyRefresh, stopTopologyRefresh } from './topology-refresh.js';
 import { setupGroupHulls, destroyGroupHulls } from './group-hulls.js';
 import { runGroupClusterLayout } from './group-cluster-layout.js';
 import { NT_GROUP_CLUSTER_KEY, loadGhostMode, loadRings, loadExpected, loadVlanFilter } from './storage.js';
@@ -112,8 +112,16 @@ function _markRefresh(ok, err) {
 // (im Hauptmodul). Daher nicht hier — bleibt im Hauptmodul.
 
 export function render(wrap, nodes, edges, dataUrl) {
+    stopTopologyRefresh();
     perfBegin('render tech (' + nodes.length + ' nodes, ' + edges.length + ' edges)');
     const pnl = document.getElementById('nt-detail');
+    // ── Cleanup vorheriger Tab-State ───────────────────────────────────────
+    if (window._ntEdgeAnim)     { clearInterval(window._ntEdgeAnim);     window._ntEdgeAnim     = null; }
+    if (window._ntCy)           { try { clearPathState(window._ntCy); } catch (e) {}
+                                  try { clearSimulation(window._ntCy); } catch (e) {}
+                                  try { clearRootCause(window._ntCy); } catch (e) {}
+                                  try { window._ntCy.destroy(); } catch (e) {} window._ntCy = null; }
+    window._ntToolbarDone = false;
     if (!nodes.length) {
         wrap.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;'
                        + 'height:100%;color:#999">' + esc(t('tech.no_hosts')) + '</div>';
@@ -289,13 +297,6 @@ export function render(wrap, nodes, edges, dataUrl) {
     const elements = buildNodeElements(nodes, perfMode).concat(buildEdgeElements(edges, nodes));
     perfMark('elements built (' + elements.length + ')');
 
-    // ── Cleanup vorheriger Tab-State ───────────────────────────────────────
-    if (window._ntEdgeAnim)     { clearInterval(window._ntEdgeAnim);     window._ntEdgeAnim     = null; }
-    if (window._ntCy)           { try { clearPathState(window._ntCy); } catch (e) {}
-                                  try { clearSimulation(window._ntCy); } catch (e) {}
-                                  try { clearRootCause(window._ntCy); } catch (e) {}
-                                  try { window._ntCy.destroy(); } catch (e) {} window._ntCy = null; }
-    window._ntToolbarDone = false;
     const oldSev    = document.getElementById('nt-sev-filter');   if (oldSev)    oldSev.remove();
     const oldSearch = document.getElementById('nt-search-input'); if (oldSearch) oldSearch.remove();
     clearWrap(wrap);
@@ -868,121 +869,97 @@ export function render(wrap, nodes, edges, dataUrl) {
         toastTruncatedOnce('refreshslow',
             t('refresh.slowed', { int: refreshLabel(nodes.length), n: nodes.length }));
     }
-    if (window._ntRefreshTimer) clearInterval(window._ntRefreshTimer);
-    _clearRefreshWarn();   // frischer Render → Refresh-Fehler-Status zuruecksetzen
-    window._ntRefreshTimer = setInterval(function() {
-        if (window._ntRefreshOn === false || !window._ntCy) return;
-        // Pause waehrend Drag — sonst zerlegt der Refresh den User-Workflow
-        // (Position springt zurueck weil neue Daten alte Positionen ueberschreiben).
-        if (window._ntDragActive) return;
-        fetchJson(dataUrl, {
-            credentials: 'same-origin',
-            headers: { 'X-Requested-With': 'XMLHttpRequest' }
-        })
-            .then(function(data) {
-                // Backend-Fehler (data.error) oder leere Antwort → Badge zeigen,
-                // letzten guten Stand behalten statt still zu ueberschreiben.
-                if (!data || !data.nodes) { _markRefresh(false); return; }
-
-                // NOCH EINMAL PRUEFEN, ob die Karte ueberhaupt noch dasteht.
-                //
-                // Die Wache oben laeuft VOR dem fetch. Eine teure Antwort
-                // braucht Sekunden, und in der Zeit kann der Benutzer den
-                // Tab wechseln: renderTable() zerstoert dann _ntCy und fuellt
-                // dieselbe Flaeche mit der Tabelle. Die verspaetete Antwort
-                // zeichnete anschliessend die Karte ueber die Tabelle,
-                // waehrend der Tabellen-Reiter markiert blieb — oder rief in
-                // der Nicht-Gruppenansicht cy.nodes() auf einer zerstoerten
-                // Instanz auf.
-                if (window._ntRefreshOn === false || !window._ntCy
-                        || (window._ntCy.destroyed && window._ntCy.destroyed())) {
-                    return;
-                }
-
-                _markRefresh(true);
-                window._ntLastData = window._ntLastData || {};
-                window._ntLastData.nodes = data.nodes;
-                window._ntLastData.edges = data.edges || [];
-                window._ntLastData.lldp_quality = data.lldp_quality || [];
-                notifyTopoChanges(data.topo_changes);
-                // In Group-View komplett re-rendern (Aggregate können sich
-                // strukturell ändern, In-Place-Update wäre fragil)
-                let inGroupView = false;
-                try { inGroupView = localStorage.getItem(NT_GROUP_VIEW_KEY) === '1'; } catch (e) {}
-                if (inGroupView) {
-                    render(wrap, data.nodes.slice(), (data.edges || []).slice(), dataUrl);
-                    return;
-                }
-                const map = {};
-                (data.nodes || []).forEach(function(n) { map[String(n.id)] = n; });
-                if (!perfMode) clearImgCache();
-                cy.nodes('[!isGroup]').forEach(function(node) {
-                    const u = map[node.id()]; if (!u) return;
-                    node.data('severity', u.severity || 0);
-                    node.data('cpu', u.cpu);
-                    node.data('memory', u.memory);
-                    node.data('ping', u.ping);
-                    node.data('traffic', u.traffic);
-                    if (u.problems !== undefined) node.data('problems', u.problems);
-                    // Defensive: nur überschreiben wenn der Refresh die Felder
-                    // tatsächlich liefert. Sonst würde z.B. ein Backend-Hiccup
-                    // den acked-Ring still verschwinden lassen.
-                    if ('acknowledged' in u) node.data('acknowledged', !!u.acknowledged);
-                    if ('maintenance'  in u) node.data('maintenance',  !!u.maintenance);
-                    if ('extra_items'  in u) node.data('extra_items',  u.extra_items || []);
-                    // Offline-Status mitziehen — das rote X (bgImage) und die
-                    // Root-Cause-Analyse brauchen frische unavailable-Flags,
-                    // sonst stimmen beide erst nach dem naechsten Voll-Render.
-                    if ('unavailable'  in u) node.data('unavailable',  !!u.unavailable);
-                    if ('down_since'   in u) node.data('down_since',   u.down_since || 0);
-                    if ('last_seen'    in u) node.data('last_seen',    u.last_seen  || 0);
-                    // Perf-Modus: nur die Severity-Farbe aktualisieren (kein SVG
-                    // neu bauen); sonst das volle Node-Image.
-                    if (perfMode) {
-                        node.data('sevColor', node.data('unavailable') ? '#9ca3af'
-                            : statusColor(node.data()));
-                    } else {
-                        node.data('bgImage', makeNodeImage(node.data()));
-                    }
-                });
-                // With an active focus, compute the KPIs on the focus subset
-                // — otherwise the row would jump to the numbers of the full
-                // group selection every 30s while the map is filtered.
-                let _kpiNodes = data.nodes || [];
-                if (isFocusActive()) {
-                    const _fk = filterToFocus(_kpiNodes, data.edges || []);
-                    if (_fk.found) _kpiNodes = _fk.nodes;
-                }
-                updateKpi(_kpiNodes, window._ntCy);
-                window._ntCy && window._ntCy.edges('[id^="ml_"]').forEach(function(e) {
-                    e.data('tLabel', edgeLabel(window._ntCy, e.source().id(), e.target().id()));
-                });
-                // #32: gemessenen Portzustand auf die BESTEHENDEN LLDP-Kanten
-                // nachziehen, BEVOR die Heatmap neu rechnet. Der In-Place-Update
-                // oben fasst nur Knoten an; die Heatmap liest portDown/Traffic
-                // aber von der Kante, und die stand sonst auf dem Stand des
-                // Erstaufbaus — ein zwischenzeitlich ausgefallener Port blieb
-                // gruen bis zum naechsten Voll-Render. measuredEdgeStatus baut
-                // die frischen Werte mit DERSELBEN Logik wie der Erstaufbau, je
-                // richtungsunabhaengigem edgeStatusKey; strukturell Neues/
-                // Entferntes kommt wie bisher erst mit dem Voll-Render.
-                const _freshStatus = measuredEdgeStatus(data.edges || [], data.nodes || []);
-                window._ntCy.edges('[?isLLDP]').forEach(function(edge) {
-                    const _f = _freshStatus[edgeStatusKey(edge.data())];
-                    if (!_f) return;
-                    Object.keys(_f).forEach(function(k) { edge.data(k, _f[k]); });
-                });
-                applyTrafficHeatmap(window._ntCy);
-                // Laufende Ausfall-Simulation neu rechnen — der In-Place-
-                // Update aendert zwar keine Edges, aber der Banner-Count
-                // und die Klassen sollen den frischen Stand reflektieren.
-                if (isSimActive()) recomputeSimulation(window._ntCy);
-                // Aktive Root-Cause-Analyse mit frischen Offline-Flags neu
-                // rechnen (nicht-verbose: keine Toast-Flut alle 30s).
-                if (isRootCauseActive()) runRootCause(window._ntCy, false);
-            })
-            .catch(function(err) { _markRefresh(false, err); });   // Netz-/HTTP-/Parse-Fehler → Badge
-    }, _refreshMs);
+    _clearRefreshWarn();
+    const canRefresh = function() {
+        return window._ntRefreshOn !== false && !window._ntDragActive
+            && window._ntCy === cy && !cy.destroyed();
+    };
+    startTopologyRefresh(dataUrl, _refreshMs, canRefresh, function(data) {
+        if (!data || (!data.nodes && !data.retry_after)) {
+            _markRefresh(false);
+            return;
+        }
+        _markRefresh(true);
+        showSnapshotStatus(wrap, data, window._ntLastData && window._ntLastData.snapshot_at);
+        if (!acceptTopologySnapshot(data, dataUrl)) return;
+        notifyTopoChanges(data.topo_changes);
+        // In Group-View komplett re-rendern (Aggregate können sich
+        // strukturell ändern, In-Place-Update wäre fragil)
+        let inGroupView = false;
+        try { inGroupView = localStorage.getItem(NT_GROUP_VIEW_KEY) === '1'; } catch (e) {}
+        if (inGroupView || !data.nodes.length) {
+            render(wrap, data.nodes.slice(), (data.edges || []).slice(), dataUrl);
+            showSnapshotStatus(wrap, data);
+            return;
+        }
+        const map = {};
+        (data.nodes || []).forEach(function(n) { map[String(n.id)] = n; });
+        if (!perfMode) clearImgCache();
+        cy.nodes('[!isGroup]').forEach(function(node) {
+            const u = map[node.id()]; if (!u) return;
+            node.data('severity', u.severity || 0);
+            node.data('cpu', u.cpu);
+            node.data('memory', u.memory);
+            node.data('ping', u.ping);
+            node.data('traffic', u.traffic);
+            if (u.problems !== undefined) node.data('problems', u.problems);
+            // Defensive: nur überschreiben wenn der Refresh die Felder
+            // tatsächlich liefert. Sonst würde z.B. ein Backend-Hiccup
+            // den acked-Ring still verschwinden lassen.
+            if ('acknowledged' in u) node.data('acknowledged', !!u.acknowledged);
+            if ('maintenance'  in u) node.data('maintenance',  !!u.maintenance);
+            if ('extra_items'  in u) node.data('extra_items',  u.extra_items || []);
+            // Offline-Status mitziehen — das rote X (bgImage) und die
+            // Root-Cause-Analyse brauchen frische unavailable-Flags,
+            // sonst stimmen beide erst nach dem naechsten Voll-Render.
+            if ('unavailable'  in u) node.data('unavailable',  !!u.unavailable);
+            if ('down_since'   in u) node.data('down_since',   u.down_since || 0);
+            if ('last_seen'    in u) node.data('last_seen',    u.last_seen  || 0);
+            // Perf-Modus: nur die Severity-Farbe aktualisieren (kein SVG
+            // neu bauen); sonst das volle Node-Image.
+            if (perfMode) {
+                node.data('sevColor', node.data('unavailable') ? '#9ca3af'
+                    : statusColor(node.data()));
+            } else {
+                node.data('bgImage', makeNodeImage(node.data()));
+            }
+        });
+        // With an active focus, compute the KPIs on the focus subset
+        // — otherwise the row would jump to the numbers of the full
+        // group selection every 30s while the map is filtered.
+        let _kpiNodes = data.nodes || [];
+        if (isFocusActive()) {
+            const _fk = filterToFocus(_kpiNodes, data.edges || []);
+            if (_fk.found) _kpiNodes = _fk.nodes;
+        }
+        updateKpi(_kpiNodes, window._ntCy);
+        window._ntCy && window._ntCy.edges('[id^="ml_"]').forEach(function(e) {
+            e.data('tLabel', edgeLabel(window._ntCy, e.source().id(), e.target().id()));
+        });
+        // #32: gemessenen Portzustand auf die BESTEHENDEN LLDP-Kanten
+        // nachziehen, BEVOR die Heatmap neu rechnet. Der In-Place-Update
+        // oben fasst nur Knoten an; die Heatmap liest portDown/Traffic
+        // aber von der Kante, und die stand sonst auf dem Stand des
+        // Erstaufbaus — ein zwischenzeitlich ausgefallener Port blieb
+        // gruen bis zum naechsten Voll-Render. measuredEdgeStatus baut
+        // die frischen Werte mit DERSELBEN Logik wie der Erstaufbau, je
+        // richtungsunabhaengigem edgeStatusKey; strukturell Neues/
+        // Entferntes kommt wie bisher erst mit dem Voll-Render.
+        const _freshStatus = measuredEdgeStatus(data.edges || [], data.nodes || []);
+        window._ntCy.edges('[?isLLDP]').forEach(function(edge) {
+            const _f = _freshStatus[edgeStatusKey(edge.data())];
+            if (!_f) return;
+            Object.keys(_f).forEach(function(k) { edge.data(k, _f[k]); });
+        });
+        applyTrafficHeatmap(window._ntCy);
+        // Laufende Ausfall-Simulation neu rechnen — der In-Place-
+        // Update aendert zwar keine Edges, aber der Banner-Count
+        // und die Klassen sollen den frischen Stand reflektieren.
+        if (isSimActive()) recomputeSimulation(window._ntCy);
+        // Aktive Root-Cause-Analyse mit frischen Offline-Flags neu
+        // rechnen (nicht-verbose: keine Toast-Flut alle 30s).
+        if (isRootCauseActive()) runRootCause(window._ntCy, false);
+    }, function(error) { _markRefresh(false, error); });
 
     perfMark('render() synchronous end (layout/overlays follow async)');
 }

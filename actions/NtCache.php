@@ -112,6 +112,40 @@ final class NtCache {
     }
 
     /**
+     * Take a nonblocking rebuild lock. Returns a handle to close, false when
+     * busy, or null when shared caching/locking is unavailable.
+     *
+     * The OS releases the lock when a worker exits. Use fixed lock stripes
+     * so arbitrary group selections cannot create an unbounded file set.
+     */
+    public static function tryLock(string $namespace, array $parts) {
+        $uid = self::uid();
+        if ($uid <= 0 || !function_exists('apcu_enabled') || !apcu_enabled()) {
+            return null;
+        }
+
+        $dir = sys_get_temp_dir() . '/nt-cache-' . substr(hash('sha256', __DIR__), 0, 16);
+        if (!is_dir($dir) && !@mkdir($dir, 0700) && !is_dir($dir)) {
+            return null;
+        }
+        if (is_link($dir) || ((int) @fileperms($dir) & 0077) !== 0) {
+            return null;
+        }
+
+        $stripe = substr(hash('sha256', self::key($namespace, $uid, $parts)), 0, 4);
+        $lock = @fopen($dir . '/' . $stripe . '.lock', 'c');
+        if ($lock === false) {
+            return null;
+        }
+        if (flock($lock, LOCK_EX | LOCK_NB, $busy)) {
+            return $lock;
+        }
+
+        fclose($lock);
+        return $busy ? false : null;
+    }
+
+    /**
      * Wert ablegen. No-Op ohne APCu/User.
      */
     public static function set(string $namespace, array $parts, $value, int $ttl): void {

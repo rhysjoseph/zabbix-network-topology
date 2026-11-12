@@ -83,7 +83,6 @@ export function renderManagement(wrap, nodes, edges) {
     // Aufräumen vorheriger Tab-State (Cytoscape, Animation, Auto-Refresh)
     if (window._ntCy)         { try { window._ntCy.destroy(); } catch (e) {} window._ntCy = null; }
     if (window._ntEdgeAnim)   { clearInterval(window._ntEdgeAnim);   window._ntEdgeAnim   = null; }
-    if (window._ntRefreshTimer) { clearInterval(window._ntRefreshTimer); window._ntRefreshTimer = null; }
     if (window._ntMinimapTimer) { clearInterval(window._ntMinimapTimer); window._ntMinimapTimer = null; }
 
     // Toolbar wird beim Wechsel zurück auf Tech neu aufgebaut

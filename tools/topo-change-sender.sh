@@ -97,6 +97,8 @@ try:
 except Exception:
     print(0); print('parse-error'); print(''); print('')
     raise SystemExit
+if d.get('error') or d.get('snapshot_stale'):
+    raise SystemExit(d.get('error') or 'Topology snapshot is being refreshed.')
 tc = d.get('topo_changes') or {}
 added   = tc.get('added')   or []
 removed = tc.get('removed') or []

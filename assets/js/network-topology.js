@@ -15,7 +15,7 @@
 import { esc } from './modules/utils.js';
 import { t } from './modules/i18n.js';
 import { toastTruncatedOnce, toast } from './modules/toast.js';
-import { fetchJson } from './modules/http.js';
+import { acceptTopologySnapshot, loadTopology, showSnapshotStatus, stopTopologyRefresh } from './modules/topology-refresh.js';
 import { hideTip } from './modules/tooltip.js';
 import { destroyGroupHulls } from './modules/group-hulls.js';
 import { NT_TAB_KEY, loadLastGroups, saveLastGroups, loadPositions,
@@ -221,6 +221,7 @@ function applyHistoryOverrides(nodes) {
 
 // ── Tab-Switch ─────────────────────────────────────────────────────────────
 function switchTab(tab, wrap, nodes, edges, dataUrl) {
+    stopTopologyRefresh();
     // Einen evtl. noch offenen Node-/Edge-Tooltip wegraeumen: das cytoscape-
     // mouseout feuert NICHT, wenn der Graph unter dem Cursor verschwindet (Klick
     // direkt auf einen Tab-Button) → der Tooltip blieb sonst ueber dem neuen Tab
@@ -391,7 +392,7 @@ function init() {
         cfg.selected_groupids.forEach(function(id) { params.append('groupids[]', id); });
     }
     const url = cfg.data_url + '&' + params;
-    fetchJson(url, { credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+    loadTopology(url)
         .then(function(data) {
             // {error: ...} kommt mit HTTP 200 (throttle(), Rechte). Vorher
             // lief das in eine leere Karte ohne jeden Hinweis.
@@ -437,17 +438,12 @@ function init() {
                 toastTruncatedOnce('scope_inc:' + cfg.selected_hostid + '/' + data.scope_graph_incomplete,
                     t('warn.scope_graph_incomplete', { n: data.scope_graph_incomplete }));
             }
-            // lldp_quality mit durchreichen — der LLDP-Q-Tab liest es aus
-            // _ntLastData (ohne dieses Feld waere der Tab immer leer).
-            // expected_links MUSS mit durch: die KPI-Leiste liest die Soll/Ist-
-            // Abweichungen aus _ntLastData.expected_links (kpi.js). Ohne dieses
-            // Feld blieb die "Expected"-Pille immer leer, obwohl das Backend die
-            // Abweichungen liefert — die Payload trug sie, nur diese Teilmenge nicht.
-            window._ntLastData = { nodes: data.nodes || [], edges: data.edges || [],
-                                   lldp_quality: data.lldp_quality || [],
-                                   expected_links: data.expected_links || null, url: url };
+            // Empty group/host selections are valid responses.
+            data.nodes = data.nodes || [];
+            acceptTopologySnapshot(data, url);
             notifyTopoChanges(data.topo_changes);
             switchTab(_activeTab, wrap, data.nodes || [], data.edges || [], url);
+            showSnapshotStatus(wrap, data);
 
             // Letzte Auswahl persistieren — nur wenn der Fetch tatsächlich
             // Hosts geliefert hat. Sonst speichern wir eine "tote" Auswahl
