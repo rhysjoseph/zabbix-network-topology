@@ -110,3 +110,25 @@ export function acceptTopologySnapshot(data, url) {
     });
     return true;
 }
+
+function edgeKey(e) {
+    if (e.id !== undefined && e.id !== null) return 'id:' + String(e.id);
+    return JSON.stringify([String(e.source || e.from || ''),
+        String(e.target || e.to || ''), e.ports || {}, e._type || e.kind || '']);
+}
+
+// Metric changes stay in place. A changed graph uses the existing full-render
+// path, including its focus, ghost, aggregation and layout handling.
+export function topologySignature(nodes, edges, quality) {
+    return JSON.stringify([
+        nodes.map(function(n) { return [String(n.id), n.type || '']; }).sort(),
+        edges.map(function(e) {
+            return [edgeKey(e), String(e.source || e.from || ''),
+                String(e.target || e.to || ''), !!e.stale, e._type || e.kind || '',
+                e.ports || {}, e.port_idx || {}];
+        }).sort(),
+        (quality || []).map(function(q) {
+            return [String(q.id), q.unmatched || []];
+        }).sort()
+    ]);
+}

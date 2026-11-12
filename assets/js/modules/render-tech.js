@@ -55,7 +55,7 @@ import { injectInternetCloud, injectGhostNodes, buildNodeElements, buildEdgeElem
 import { isFocusActive, filterToFocus, dropFocus, renderFocusBanner } from './focus-mode.js';
 import { initClientFocus, revealClientsOf, hideAllClients, isClientNode } from './client-focus.js';
 import { toast, toastTruncatedOnce } from './toast.js';
-import { acceptTopologySnapshot, showSnapshotStatus, startTopologyRefresh, stopTopologyRefresh } from './topology-refresh.js';
+import { acceptTopologySnapshot, showSnapshotStatus, startTopologyRefresh, stopTopologyRefresh, topologySignature } from './topology-refresh.js';
 import { setupGroupHulls, destroyGroupHulls } from './group-hulls.js';
 import { runGroupClusterLayout } from './group-cluster-layout.js';
 import { NT_GROUP_CLUSTER_KEY, loadGhostMode, loadRings, loadExpected, loadVlanFilter } from './storage.js';
@@ -114,6 +114,8 @@ function _markRefresh(ok, err) {
 export function render(wrap, nodes, edges, dataUrl) {
     stopTopologyRefresh();
     perfBegin('render tech (' + nodes.length + ' nodes, ' + edges.length + ' edges)');
+    const refreshSignature = topologySignature(nodes, edges,
+        (window._ntLastData && window._ntLastData.lldp_quality) || []);
     const pnl = document.getElementById('nt-detail');
     // ── Cleanup vorheriger Tab-State ───────────────────────────────────────
     if (window._ntEdgeAnim)     { clearInterval(window._ntEdgeAnim);     window._ntEdgeAnim     = null; }
@@ -887,7 +889,8 @@ export function render(wrap, nodes, edges, dataUrl) {
         // strukturell ändern, In-Place-Update wäre fragil)
         let inGroupView = false;
         try { inGroupView = localStorage.getItem(NT_GROUP_VIEW_KEY) === '1'; } catch (e) {}
-        if (inGroupView || !data.nodes.length) {
+        if (inGroupView || topologySignature(data.nodes, data.edges || [],
+                data.lldp_quality || []) !== refreshSignature) {
             render(wrap, data.nodes.slice(), (data.edges || []).slice(), dataUrl);
             showSnapshotStatus(wrap, data);
             return;
@@ -902,6 +905,8 @@ export function render(wrap, nodes, edges, dataUrl) {
             node.data('memory', u.memory);
             node.data('ping', u.ping);
             node.data('traffic', u.traffic);
+            if ('iface_health' in u) node.data('iface_health', u.iface_health);
+            if ('link_speed' in u) node.data('link_speed', u.link_speed);
             if (u.problems !== undefined) node.data('problems', u.problems);
             // Defensive: nur überschreiben wenn der Refresh die Felder
             // tatsächlich liefert. Sonst würde z.B. ein Backend-Hiccup
