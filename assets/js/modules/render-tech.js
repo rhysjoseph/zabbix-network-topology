@@ -832,7 +832,7 @@ export function render(wrap, nodes, edges, dataUrl, retained = null) {
             });
             render(wrap, data.nodes.slice(), (data.edges || []).slice(), dataUrl, {
                 positions, pan: { ...cy.pan() }, zoom: cy.zoom(), minZoom: cy.minZoom(),
-                packed: !!wrap.querySelector('#nt-group-hulls[data-filled="true"]')
+                packed: !!wrap.querySelector('#nt-group-hulls[data-packed="true"]')
             });
             showSnapshotStatus(wrap, data);
             return;

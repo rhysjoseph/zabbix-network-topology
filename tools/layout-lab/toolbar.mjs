@@ -272,11 +272,16 @@ async function exerciseGroupOutlines(page) {
         const boundaries = page.locator('#nt-group-hulls > path');
         assert.equal(await boundaries.count(),withBoundaries ? 4 : 0);
         if (withBoundaries) {
-            const strokes = await boundaries.evaluateAll(paths => paths.map(path =>
-                [path.getAttribute('fill'), path.getAttribute('stroke'), path.getAttribute('stroke-dasharray')]));
-            assert.ok(strokes.every(([fill, , dash]) => fill === 'none' && dash));
-            assert.ok(strokes.some(([, colour])=>colour==='#3b82f6'));
-            assert.ok(strokes.some(([, colour])=>colour==='#ef4444'));
+            const styles = await boundaries.evaluateAll(paths => paths.map(path => ({
+                fill: path.getAttribute('fill'),
+                opacity: Number(path.getAttribute('fill-opacity')),
+                stroke: path.getAttribute('stroke'),
+                dash: path.getAttribute('stroke-dasharray')
+            })));
+            assert.ok(styles.every(({fill, opacity, stroke, dash}) =>
+                fill === stroke && opacity > 0 && opacity < 1 && dash));
+            assert.ok(styles.some(({stroke})=>stroke==='#3b82f6'));
+            assert.ok(styles.some(({stroke})=>stroke==='#ef4444'));
         }
         const outlines = await page.evaluate(() => window._ntCy.nodes('.nt-group-colour').map(n => ({
             group:n.data('_primaryGroup'), colour:n.style('border-color'), width:n.numericStyle('border-width')

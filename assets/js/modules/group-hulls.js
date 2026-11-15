@@ -72,8 +72,8 @@ export function updateGroupOutlines(cy, wrap, groupNames, mode, {packed = false,
     const autoWithRings = mode === 'auto' && groupNames.length > 1 && !packed;
     const showColours = mode === 'colors' || autoWithRings;
     applyGroupColours(cy, wrap, showColours, groupNames);
-    // Groups can cross on the shared tier rows. Draw the boundaries without
-    // a fill and use the node rings and legend to show group membership.
+    // Groups can cross on the shared tier rows, so keep the node rings and
+    // legend to show membership alongside the tinted group boundaries.
     if (packed || (autoWithRings && tiered)) setupGroupHulls(cy, wrap, packed);
 }
 
@@ -138,7 +138,7 @@ function clearSvg() {
 
 // Sammelt pro Gruppe die Render-Positionen aller zugehörigen Knoten und
 // zeichnet das Polygon. Wird bei Pan/Zoom/Drag aufgerufen.
-function redraw(cy, filled) {
+function redraw(cy, packed) {
     // Der ResizeObserver kann nach einem Tab-Wechsel noch feuern, waehrend das
     // cy schon zerstoert ist → auf zerstoertem/fehlendem Core nichts tun.
     if (!_svg || !cy || (cy.destroyed && cy.destroyed())) return;
@@ -192,8 +192,8 @@ function redraw(cy, filled) {
 
         const path = document.createElementNS(NS, 'path');
         path.setAttribute('d', dStr);
-        path.setAttribute('fill', filled ? col : 'none');
-        if (filled) path.setAttribute('fill-opacity', '0.10');
+        path.setAttribute('fill', col);
+        path.setAttribute('fill-opacity', '0.10');
         path.setAttribute('stroke', col);
         path.setAttribute('stroke-opacity', '0.45');
         path.setAttribute('stroke-width', '1.5');
@@ -202,7 +202,7 @@ function redraw(cy, filled) {
         _svg.appendChild(path);
 
         // The legend already names each group in the shared hierarchy.
-        if (!filled) return;
+        if (!packed) return;
 
         // Gruppen-Label über dem höchsten Punkt der Hülle
         let topPoint = hull[0];
@@ -239,10 +239,10 @@ function redraw(cy, filled) {
     });
 }
 
-function setupGroupHulls(cy, wrap, filled) {
+function setupGroupHulls(cy, wrap, packed) {
     if (!cy || !wrap) return;
     ensureSvg(wrap);
-    _svg.dataset.filled = String(filled);
+    _svg.dataset.packed = String(packed);
 
     // Listener: bei jeder Position-Änderung neu zeichnen.
     // requestAnimationFrame entkoppelt Cytoscape-Event von Render —
@@ -251,7 +251,7 @@ function setupGroupHulls(cy, wrap, filled) {
         if (_redrawHandle) return;
         _redrawHandle = requestAnimationFrame(function() {
             _redrawHandle = null;
-            redraw(cy, filled);
+            redraw(cy, packed);
         });
     }
 
@@ -268,7 +268,7 @@ function setupGroupHulls(cy, wrap, filled) {
     }
 
     // Initial-Render
-    redraw(cy, filled);
+    redraw(cy, packed);
 }
 
 export function destroyGroupHulls() {
