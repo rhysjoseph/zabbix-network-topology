@@ -72,7 +72,7 @@ export function updateGroupOutlines(cy, wrap, groupNames, mode, {packed = false,
     const autoWithRings = mode === 'auto' && groupNames.length > 1 && !packed;
     const showColours = mode === 'colors' || autoWithRings;
     applyGroupColours(cy, wrap, showColours, groupNames);
-    // Groups can cross on the shared tier rows, so keep the node rings and
+    // Groups can cross in a shared tier layout, so keep the node rings and
     // legend to show membership alongside the tinted group boundaries.
     if (packed || (autoWithRings && tiered)) setupGroupHulls(cy, wrap, packed);
 }

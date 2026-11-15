@@ -309,6 +309,43 @@ async function exerciseGroupOutlines(page) {
         await coloursVisible();
     }
 
+    const waitForTierRings = () => page.waitForFunction(() => {
+        const nodes = window._ntCy.nodes();
+        const spines = nodes.filter('[layout_tier = "spine"]');
+        if (spines.length !== 4) return false;
+        const centre = spines.reduce((sum, node) => ({
+            x: sum.x + node.position('x') / spines.length,
+            y: sum.y + node.position('y') / spines.length
+        }), {x: 0, y: 0});
+        const radius = node => Math.hypot(node.position('x') - centre.x, node.position('y') - centre.y);
+        const rings = [spines, nodes.filter('[layout_tier = "leaf"]'),
+            nodes.filter('[layout_tier = "access"]')].map(ring => ring.map(radius));
+        return rings.every((ring, index) => ring.length === [4, 6, 20][index]
+            && Math.max(...ring) - Math.min(...ring) < 0.01
+            && (index === 0 || Math.min(...ring) > Math.max(...rings[index - 1]) + 40))
+            && radius(nodes.filter('[label = "Event Router"]').first()) > Math.max(...rings[2]);
+    });
+    await chooseLayout('Concentric');
+    await waitForTierRings();
+    await coloursVisible();
+    await visit('tree');
+    await visit('tech');
+    await waitForTierRings();
+    await coloursVisible();
+
+    await chooseCluster('columns');
+    await page.waitForFunction(() => {
+        const nodes = window._ntCy.nodes().filter(n => (n.data('_primaryGroup') || '').endsWith('/Media Blue'));
+        const core = nodes.filter('[layout_tier = "spine"]').first();
+        if (core.length !== 1) return false;
+        const radii = nodes.filter('[layout_tier = "leaf"]').map(n =>
+            Math.hypot(n.position('x') - core.position('x'), n.position('y') - core.position('y')));
+        return radii.length === 3 && Math.min(...radii) > 40 && Math.max(...radii) - Math.min(...radii) < 0.01;
+    });
+    assert.equal(await page.locator('#nt-group-hulls[data-packed="true"] > path').count(),4);
+    await chooseCluster('auto');
+    await waitForTierRings();
+
     // Picking Force packs the groups. Returning to Technical uses its saved
     // positions and should draw individual outlines without reclustering.
     const saved = page.waitForRequest(req=>req.method()==='POST'

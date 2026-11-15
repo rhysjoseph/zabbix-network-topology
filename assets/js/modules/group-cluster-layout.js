@@ -1,7 +1,7 @@
 // Lay out each host group in model coordinates and place the resulting bounds
 // side by side or one below another. The browser fits the whole map afterward.
 
-import { buildLayoutConfig } from './layouts.js';
+import { buildLayoutConfig, usesTieredLayout } from './layouts.js';
 import { fitTopology, separateLayoutNodes } from './layout-spacing.js';
 
 const GAP = 160;
@@ -156,8 +156,9 @@ export function runGroupClusterLayout(cy, groupNames, mode, onComplete, innerLay
         const nodes = group.collection = cy.collection(group.nodes);
         const bounds = groupBounds(nodes);
         const elements = nodes.union(cy.collection(group.edges));
-        const options = innerLayoutId === 'hierarchy' ? {
-            ...buildLayoutConfig('hierarchy', nodes.map(node => node.data()),
+        const nodeData = nodes.map(node => node.data());
+        const options = innerLayoutId === 'hierarchy' || usesTieredLayout(innerLayoutId, nodeData) ? {
+            ...buildLayoutConfig(innerLayoutId, nodeData,
                 group.edges.map(edge => edge.data()), true),
             animate: false, fit: false, stop: undefined
         } : buildClusterLayoutConfig(bounds, nodes.length, innerLayoutId);

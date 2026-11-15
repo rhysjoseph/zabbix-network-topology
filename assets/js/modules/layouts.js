@@ -9,7 +9,7 @@
 //   auto         — Heuristik (Preset bei gespeicherten Positionen, sonst
 //                  concentric bei sparse Graphen, sonst cose)
 //   cose         — Force-Directed: gut für dichte, vermaschte Topologien
-//   concentric   — Konzentrische Ringe nach Knoten-Grad: Hub im Zentrum
+//   concentric   — Ringe nach nt:tier, sonst Knoten-Grad
 //   grid         — Gleichmäßiges Raster: gut für Übersichten ohne Edges
 //   breadthfirst — Hierarchischer Baum von oben nach unten
 
@@ -42,15 +42,36 @@ const TIER_ORDER = {
 const TIER_DEFAULT = 4;   // unbekannte Device-Types landen bei "Server"
 const ROLE_TIER = new Map([['spine', 2], ['leaf', 3], ['access', 4], ['endpoint', 7]]);
 
-export function hasLayoutTiers(nodes) {
+function hasLayoutTiers(nodes) {
     return nodes.some(n => ROLE_TIER.has(n.layout_tier));
+}
+
+export function usesTieredLayout(layoutId, nodes) {
+    return (layoutId === 'hierarchy' || layoutId === 'concentric') && hasLayoutTiers(nodes);
 }
 
 export function shouldClusterGroups(layoutId, nodes, groupCount, mode, saved = false) {
     if (groupCount < 2 || mode === 'off' || mode === 'colors') return false;
     // Explicit rows/columns still let an operator choose host group boxes.
     if (mode !== 'auto') return true;
-    return !saved && !(layoutId === 'hierarchy' && hasLayoutTiers(nodes));
+    return !saved && !usesTieredLayout(layoutId, nodes);
+}
+
+function layoutTier(node, tagged) {
+    if (String(node.id).startsWith('internet_')) return -1;
+    if (!tagged) return TIER_ORDER[node.type] !== undefined ? TIER_ORDER[node.type] : TIER_DEFAULT;
+    if (ROLE_TIER.has(node.layout_tier)) return ROLE_TIER.get(node.layout_tier);
+    // Untagged infrastructure stays visible below the declared switch tiers.
+    return node.type === 'firewall' ? 0 : node.type === 'router' ? 1 :
+        node.type === 'switch' || node.type === 'wireless' ? 5 :
+        node._isGhost || node._isEndpointBundle || node.type === 'client' ? 7 : 6;
+}
+
+function concentricTier(node) {
+    const tier = layoutTier(node.data(), true);
+    // Keep the innermost level for spines/cores. In Hierarchy, the Internet
+    // and untagged routers/firewalls have rows above them.
+    return -(tier < ROLE_TIER.get('spine') ? ROLE_TIER.get('endpoint') : tier);
 }
 
 // Platziert Tiers von oben nach unten und BRICHT breite Tiers in mehrere
@@ -109,19 +130,7 @@ function buildHierarchyPositions(nodes, edges) {
     // Nodes nach Tier gruppieren
     const byTier = {};
     nodes.forEach(function(n) {
-        let tier;
-        if (String(n.id).indexOf('internet_') === 0) {
-            tier = -1;
-        } else if (tagged) {
-            // Untagged infrastructure stays visible below the declared
-            // switch tiers. Attachments stay at the bottom.
-            tier = ROLE_TIER.has(n.layout_tier) ? ROLE_TIER.get(n.layout_tier) : (
-                n.type === 'firewall' ? 0 : n.type === 'router' ? 1 :
-                n.type === 'switch' || n.type === 'wireless' ? 5 :
-                n._isGhost || n._isEndpointBundle || n.type === 'client' ? 7 : 6);
-        } else {
-            tier = TIER_ORDER[n.type] !== undefined ? TIER_ORDER[n.type] : TIER_DEFAULT;
-        }
+        const tier = layoutTier(n, tagged);
         if (!byTier[tier]) byTier[tier] = [];
         byTier[tier].push(n);
     });
@@ -399,6 +408,8 @@ export function letzterLayoutGrund() {
 
 export function buildLayoutConfig(layoutId, nodes, edges, forceFresh) {
     _letzterGrund = '';
+    // Auto's fallback to Concentric still uses the degree-based layout.
+    const tieredRings = layoutId === 'concentric' && hasLayoutTiers(nodes);
     if ((layoutId === 'auto' || layoutId === 'cose') && !forceFresh) {
         // Preset-Versuch: 80% der Nodes haben gespeicherte, plausible Positionen
         const sp = loadPositions();
@@ -494,7 +505,7 @@ export function buildLayoutConfig(layoutId, nodes, edges, forceFresh) {
                 name: 'concentric', animate: true, animationDuration: 500,
                 padding: 50, fit: true, minNodeSpacing: 60,
                 nodeDimensionsIncludeLabels: true,
-                concentric: function(node) { return node.degree(); },
+                concentric: tieredRings ? concentricTier : function(node) { return node.degree(); },
                 levelWidth: function() { return 1; }
             };
         case 'grid':

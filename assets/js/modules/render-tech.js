@@ -50,7 +50,7 @@ import { applyTrafficHeatmap, startEdgeAnimation } from './traffic.js';
 import { applyBundleView, bindBundleView, trunkData } from './parallel-links.js';
 import { collapseLeaves, bindCollapse, leafCandidates, collapsePref,
          COLLAPSE_SCHWELLE } from './collapse-leaves.js';
-import { buildLayoutConfig, hasLayoutTiers, letzterLayoutGrund, positionsLayout, shouldClusterGroups } from './layouts.js';
+import { buildLayoutConfig, letzterLayoutGrund, positionsLayout, shouldClusterGroups, usesTieredLayout } from './layouts.js';
 import { buildCytoscapeStyle } from './render-tech-style.js';
 import { injectInternetCloud, injectGhostNodes, buildNodeElements, buildEdgeElements, tagWlanAp, measuredEdgeStatus, edgeStatusKey } from './build-elements.js';
 import { isFocusActive, filterToFocus, dropFocus, renderFocusBanner } from './focus-mode.js';
@@ -385,7 +385,7 @@ export function render(wrap, nodes, edges, dataUrl, retained = null) {
     // Performance-Modus: einfache Severity-Punkte statt SVG-Pie-Knoten.
     if (perfMode) cy.nodes('[!isGroup]').addClass('nt-perf');
     updateGroupOutlines(cy, wrap, groupNames, _clusterMode, {
-        packed, tiered: layoutId === 'hierarchy' && hasLayoutTiers(nodes)
+        packed, tiered: usesTieredLayout(layoutId, nodes)
     });
 
     // UniFi-Client-Endgeraete ab Frame 1 ausblenden (client-focus.js). Sie

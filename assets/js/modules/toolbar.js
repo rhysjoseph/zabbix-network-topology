@@ -51,7 +51,7 @@ import { isLinkModeActive, enterLinkMode, exitLinkMode } from './manual-links.js
 import { setupExportMenu } from './export.js';
 import { setupFdbFinder } from './fdb-finder.js';
 import { addHistoryButton } from './history-mode.js';
-import { LAYOUT_OPTIONS, buildLayoutConfig, hasLayoutTiers, shouldClusterGroups } from './layouts.js';
+import { LAYOUT_OPTIONS, buildLayoutConfig, shouldClusterGroups, usesTieredLayout } from './layouts.js';
 import { setupPresetsUI } from './presets-ui.js';
 import { buildSevFilter } from './sev-filter.js';
 import { runGroupClusterLayout } from './group-cluster-layout.js';
@@ -315,7 +315,7 @@ export function setupToolbar(cy, wrap, nodes, groupNames, isDark, useLayout) {
                 const _clusterMode = isGroupViewEffective() ? 'off' : loadClusterMode();
                 const _useCluster = shouldClusterGroups(opt.id, nodes, groupNames.length, _clusterMode);
                 updateGroupOutlines(cy, wrap, groupNames, _clusterMode, {
-                    packed: _useCluster, tiered: opt.id === 'hierarchy' && hasLayoutTiers(nodes)
+                    packed: _useCluster, tiered: usesTieredLayout(opt.id, nodes)
                 });
 
                 if (_useCluster) {
