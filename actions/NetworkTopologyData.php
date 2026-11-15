@@ -435,7 +435,8 @@ class NetworkTopologyData extends NetworkTopologyController {
         if ($snapshot === null || $this->snapshotIsStale($snapshot)) {
             $lock = NtCache::tryLock('data_snapshot', $cache_parts);
             if ($lock === false) {
-                if ($snapshot === null || time() - $snapshot['built_at'] >= self::SNAPSHOT_TTL) {
+                if ($snapshot === null || time() - $snapshot['built_at'] >= self::SNAPSHOT_TTL
+                        || !$this->snapshotHostsStillVisible($snapshot['core'])) {
                     $this->jsonResponse(['retry_after' => 3, 'error' => 'Topology is being rebuilt.']);
                     return;
                 }
@@ -469,6 +470,40 @@ class NetworkTopologyData extends NetworkTopologyController {
 
     private function snapshotIsStale(array $snapshot): bool {
         return time() - $snapshot['built_at'] >= self::SNAPSHOT_FRESH_FOR;
+    }
+
+    // Recheck visibility as the current user before serving a stale snapshot.
+    // If the check fails, return the ordinary retry response while the builder runs.
+    private function snapshotHostsStillVisible(array $core): bool {
+        $ids = [];
+        foreach (($core['nodes'] ?? []) as $n) {
+            $id = (string) ($n['id'] ?? '');
+            if ($id !== '' && ctype_digit($id)) {
+                $ids[$id] = true;
+            }
+        }
+        if (!$ids) {
+            return true;   // nur Geister/Internet — keine echten Hosts zu pruefen
+        }
+        try {
+            $vis = API::Host()->get([
+                'output'       => ['hostid'],
+                'hostids'      => array_keys($ids),
+                'preservekeys' => true,
+            ]);
+        }
+        catch (\Throwable $e) {
+            return false;
+        }
+        if (!is_array($vis)) {
+            return false;
+        }
+        foreach ($ids as $id => $_) {
+            if (!isset($vis[$id])) {
+                return false;   // ein Host ist dem User NACHWEISLICH nicht mehr sichtbar
+            }
+        }
+        return true;
     }
 
     private function respondSnapshot(array $snapshot, array $cache_parts, int $requested_groups,
