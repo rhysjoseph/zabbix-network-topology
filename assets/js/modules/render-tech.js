@@ -50,7 +50,7 @@ import { applyTrafficHeatmap, startEdgeAnimation } from './traffic.js';
 import { applyBundleView, bindBundleView, trunkData } from './parallel-links.js';
 import { collapseLeaves, bindCollapse, leafCandidates, collapsePref,
          COLLAPSE_SCHWELLE } from './collapse-leaves.js';
-import { buildLayoutConfig, letzterLayoutGrund, positionsLayout, shouldClusterGroups } from './layouts.js';
+import { buildLayoutConfig, hasLayoutTiers, letzterLayoutGrund, positionsLayout, shouldClusterGroups } from './layouts.js';
 import { buildCytoscapeStyle } from './render-tech-style.js';
 import { injectInternetCloud, injectGhostNodes, buildNodeElements, buildEdgeElements, tagWlanAp, measuredEdgeStatus, edgeStatusKey } from './build-elements.js';
 import { isFocusActive, filterToFocus, dropFocus, renderFocusBanner } from './focus-mode.js';
@@ -326,7 +326,7 @@ export function render(wrap, nodes, edges, dataUrl, retained = null) {
         : buildLayoutConfig(layoutId, nodes, edges, false);
     const _useCluster = !retained && !_groupViewActive
         && shouldClusterGroups(layoutId, nodes, groupNames.length, _clusterMode, selectedLayout.saved);
-    const showHulls = !_groupViewActive && (retained ? retained.showHulls : _useCluster);
+    const packed = !_groupViewActive && (retained ? retained.packed : _useCluster);
     if (_useCluster && selectedLayout.saved) {
         toastTruncatedOnce('clusterpos', t('cluster.overrides_positions'));
     }
@@ -384,7 +384,9 @@ export function render(wrap, nodes, edges, dataUrl, retained = null) {
 
     // Performance-Modus: einfache Severity-Punkte statt SVG-Pie-Knoten.
     if (perfMode) cy.nodes('[!isGroup]').addClass('nt-perf');
-    updateGroupOutlines(cy, wrap, groupNames, _clusterMode, showHulls);
+    updateGroupOutlines(cy, wrap, groupNames, _clusterMode, {
+        packed, tiered: layoutId === 'hierarchy' && hasLayoutTiers(nodes)
+    });
 
     // UniFi-Client-Endgeraete ab Frame 1 ausblenden (client-focus.js). Sie
     // bleiben im Graphen (das Layout positioniert sie neben ihrem AP), sind aber
@@ -830,7 +832,7 @@ export function render(wrap, nodes, edges, dataUrl, retained = null) {
             });
             render(wrap, data.nodes.slice(), (data.edges || []).slice(), dataUrl, {
                 positions, pan: { ...cy.pan() }, zoom: cy.zoom(), minZoom: cy.minZoom(),
-                showHulls: !!wrap.querySelector('#nt-group-hulls')
+                packed: !!wrap.querySelector('#nt-group-hulls[data-filled="true"]')
             });
             showSnapshotStatus(wrap, data);
             return;

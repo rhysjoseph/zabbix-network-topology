@@ -264,12 +264,20 @@ async function exerciseGroupOutlines(page) {
         await hit(page,'#nt-btn-cluster','center');
         await page.locator(`#nt-cluster-wrap [data-mode="${mode}"]`).click();
     };
-    const coloursVisible = async () => {
+    const coloursVisible = async (withBoundaries = true) => {
         const legend = page.locator('#nt-group-colour-legend');
         assert.ok(await legend.isVisible(),'the group colour legend should be visible');
         assert.equal(await legend.locator(':scope > span').count(),4);
         assert.match(await legend.textContent(),/Media Blue.*Media Red/);
-        assert.equal(await page.locator('#nt-group-hulls').count(),0);
+        const boundaries = page.locator('#nt-group-hulls > path');
+        assert.equal(await boundaries.count(),withBoundaries ? 4 : 0);
+        if (withBoundaries) {
+            const strokes = await boundaries.evaluateAll(paths => paths.map(path =>
+                [path.getAttribute('fill'), path.getAttribute('stroke'), path.getAttribute('stroke-dasharray')]));
+            assert.ok(strokes.every(([fill, , dash]) => fill === 'none' && dash));
+            assert.ok(strokes.some(([, colour])=>colour==='#3b82f6'));
+            assert.ok(strokes.some(([, colour])=>colour==='#ef4444'));
+        }
         const outlines = await page.evaluate(() => window._ntCy.nodes('.nt-group-colour').map(n => ({
             group:n.data('_primaryGroup'), colour:n.style('border-color'), width:n.numericStyle('border-width')
         })));
@@ -291,6 +299,7 @@ async function exerciseGroupOutlines(page) {
     for (const tab of ['tree','mgmt']) {
         await visit(tab);
         assert.equal(await page.locator('#nt-group-colour-legend').count(),0);
+        assert.equal(await page.locator('#nt-group-hulls').count(),0);
         await visit('tech');
         await coloursVisible();
     }
@@ -305,7 +314,7 @@ async function exerciseGroupOutlines(page) {
     await saved;
     await visit('tree');
     await visit('tech');
-    await coloursVisible();
+    await coloursVisible(false);
 
     await chooseLayout('Force');
     assert.equal(await page.locator('#nt-group-hulls > path').count(),4);

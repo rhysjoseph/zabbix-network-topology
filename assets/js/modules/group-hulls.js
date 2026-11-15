@@ -11,7 +11,7 @@
 //     aber auch nicht in die Nachbar-Spalte blutet (siehe PADDING-Konstante)
 //
 // Ein-/Ausschalten:
-//   - updateGroupOutlines() wählt Hüllen oder farbige Knotenränder
+//   - updateGroupOutlines() setzt Gruppenhüllen und farbige Knotenränder
 //   - destroyGroupHulls() entfernt das Overlay beim Tab-Wechsel
 
 import { grpColor } from './severity.js';
@@ -67,13 +67,14 @@ function applyGroupColours(cy, wrap, on, groupNames) {
     wrap.appendChild(legend);
 }
 
-export function updateGroupOutlines(cy, wrap, groupNames, mode, showHulls) {
+export function updateGroupOutlines(cy, wrap, groupNames, mode, {packed = false, tiered = false} = {}) {
     destroyGroupHulls();
-    // Auto can keep a global hierarchy or restore saved coordinates. Use
-    // individual outlines in those layouts where group hulls could overlap.
-    const showColours = mode === 'colors' || (mode === 'auto' && groupNames.length > 1 && !showHulls);
+    const autoWithRings = mode === 'auto' && groupNames.length > 1 && !packed;
+    const showColours = mode === 'colors' || autoWithRings;
     applyGroupColours(cy, wrap, showColours, groupNames);
-    if (showHulls) setupGroupHulls(cy, wrap);
+    // Groups can cross on the shared tier rows. Draw the boundaries without
+    // a fill and use the node rings and legend to show group membership.
+    if (packed || (autoWithRings && tiered)) setupGroupHulls(cy, wrap, packed);
 }
 
 // Andrew's monotone chain — Convex Hull O(n log n).
@@ -137,7 +138,7 @@ function clearSvg() {
 
 // Sammelt pro Gruppe die Render-Positionen aller zugehörigen Knoten und
 // zeichnet das Polygon. Wird bei Pan/Zoom/Drag aufgerufen.
-function redraw(cy) {
+function redraw(cy, filled) {
     // Der ResizeObserver kann nach einem Tab-Wechsel noch feuern, waehrend das
     // cy schon zerstoert ist → auf zerstoertem/fehlendem Core nichts tun.
     if (!_svg || !cy || (cy.destroyed && cy.destroyed())) return;
@@ -191,14 +192,17 @@ function redraw(cy) {
 
         const path = document.createElementNS(NS, 'path');
         path.setAttribute('d', dStr);
-        path.setAttribute('fill', col);
-        path.setAttribute('fill-opacity', '0.10');
+        path.setAttribute('fill', filled ? col : 'none');
+        if (filled) path.setAttribute('fill-opacity', '0.10');
         path.setAttribute('stroke', col);
         path.setAttribute('stroke-opacity', '0.45');
         path.setAttribute('stroke-width', '1.5');
         path.setAttribute('stroke-dasharray', '6,4');
         path.setAttribute('stroke-linejoin', 'round');
         _svg.appendChild(path);
+
+        // The legend already names each group in the shared hierarchy.
+        if (!filled) return;
 
         // Gruppen-Label über dem höchsten Punkt der Hülle
         let topPoint = hull[0];
@@ -235,9 +239,10 @@ function redraw(cy) {
     });
 }
 
-function setupGroupHulls(cy, wrap) {
+function setupGroupHulls(cy, wrap, filled) {
     if (!cy || !wrap) return;
     ensureSvg(wrap);
+    _svg.dataset.filled = String(filled);
 
     // Listener: bei jeder Position-Änderung neu zeichnen.
     // requestAnimationFrame entkoppelt Cytoscape-Event von Render —
@@ -246,7 +251,7 @@ function setupGroupHulls(cy, wrap) {
         if (_redrawHandle) return;
         _redrawHandle = requestAnimationFrame(function() {
             _redrawHandle = null;
-            redraw(cy);
+            redraw(cy, filled);
         });
     }
 
@@ -263,7 +268,7 @@ function setupGroupHulls(cy, wrap) {
     }
 
     // Initial-Render
-    redraw(cy);
+    redraw(cy, filled);
 }
 
 export function destroyGroupHulls() {
