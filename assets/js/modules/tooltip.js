@@ -9,7 +9,7 @@
 //   _sparkCache   — hostid -> {cpu:[...], ping:[...], since, ts}
 //   _sparkPending — hostid -> true, verhindert parallele Fetches
 
-import { esc, fmt, fmtItemValue, isDark, paintAdaptive } from './utils.js';
+import { esc, fmt, fmtItemValue, isDark, paintAdaptive, mountFloatingUi } from './utils.js';
 import { utilizationColor, utilizationPct } from './traffic.js';
 import { meta as qualiMeta, QUALITY } from './quality.js';
 import { t } from './i18n.js';
@@ -28,7 +28,7 @@ _tip.style.cssText = 'display:none;position:fixed;z-index:99998;background:var(-
     + 'border:1px solid var(--nt-line);color:var(--nt-text-2);'
     + 'border-radius:8px;box-shadow:var(--nt-shadow);padding:10px 14px;font-size:12px;'
     + 'font-family:sans-serif;pointer-events:none;min-width:160px;';
-document.body.appendChild(_tip);
+mountFloatingUi(_tip);
 
 function _syncTheme() {
     _tip.classList.toggle('nt-dark', isDark());

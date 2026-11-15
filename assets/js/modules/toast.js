@@ -5,6 +5,8 @@
 //
 // API: toast(message, type='info', durationMs=3500)
 
+import { mountFloatingUi } from './utils.js';
+
 const TOAST_COLORS = {
     info:    { bg: '#0891b2', fg: '#ffffff' },   // cyan
     success: { bg: '#16a34a', fg: '#ffffff' },   // grün
@@ -21,7 +23,7 @@ function _ensureStack() {
     _stack.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:10000;'
         + 'display:flex;flex-direction:column;gap:8px;pointer-events:none;'
         + 'max-width:380px';
-    document.body.appendChild(_stack);
+    mountFloatingUi(_stack);
     return _stack;
 }
 

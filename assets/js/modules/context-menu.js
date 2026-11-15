@@ -25,7 +25,7 @@ import { isSimulated, isSimActive, simulatedCount,
 import { isFocusActive, getFocusId, getFocusHops,
          setFocus, clearFocus } from './focus-mode.js';
 import { t } from './i18n.js';
-import { isDark, hostEditUrl, paintAdaptive } from './utils.js';
+import { isDark, hostEditUrl, paintAdaptive, mountFloatingUi } from './utils.js';
 import { fetchJson } from './http.js';
 
 // Attached to <body> like the tooltip → color tokens via .nt-float; the dark
@@ -35,7 +35,7 @@ _ctx.className = 'nt-float';
 _ctx.style.cssText = 'display:none;position:fixed;z-index:9999;background:var(--nt-surface);'
     + 'border:1px solid var(--nt-line);color:var(--nt-text-2);'
     + 'border-radius:6px;box-shadow:var(--nt-shadow);min-width:190px;font-size:13px;overflow:hidden';
-document.body.appendChild(_ctx);
+mountFloatingUi(_ctx);
 
 // Menü an (cx,cy) zeigen und in den Viewport clampen — sonst laeuft ein langes
 // Menue (z.B. mit Maintenance-Eintraegen) unten/rechts aus dem Bild. max-height

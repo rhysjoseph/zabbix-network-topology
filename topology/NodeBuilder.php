@@ -273,6 +273,7 @@ final class NodeBuilder {
                 // Type-loose: API liefert mal '1', mal 1
                 'maintenance' => (int) ($h['maintenance_status'] ?? 0) === 1,
                 'type'        => $effective_type,
+                'layout_tier' => $tags['tier'][$hid] ?? null,
                 'icon_override' => isset($host_icon_override[$hid]),  // Frontend-Hinweis
                 'groups'      => $host_group_names[$hid] ?? [],
                 // Proxy/ProxyGroup-Lookup (leer wenn Host direkt am Server hängt)

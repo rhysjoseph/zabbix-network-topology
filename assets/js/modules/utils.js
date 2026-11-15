@@ -32,6 +32,29 @@ export function isDark() {
     return !!(root && root.classList.contains('nt-dark'));
 }
 
+let floatingUiListeners = false;
+
+// Only descendants of the fullscreen element are visible in fullscreen.
+// Fixed overlays live under body in the regular view and follow the map into
+// fullscreen, including overlays that were already mounted.
+export function mountFloatingUi(element) {
+    function host() {
+        return document.fullscreenElement || document.webkitFullscreenElement || document.body;
+    }
+    element.setAttribute('data-nt-floating', '');
+    host().appendChild(element);
+    if (floatingUiListeners) return;
+    floatingUiListeners = true;
+    function moveOverlays() {
+        const target = host();
+        document.querySelectorAll('[data-nt-floating]').forEach(function(overlay) {
+            if (overlay.parentNode !== target) target.appendChild(overlay);
+        });
+    }
+    document.addEventListener('fullscreenchange', moveOverlays);
+    document.addEventListener('webkitfullscreenchange', moveOverlays);
+}
+
 // linkCapacity — Edge-Kapazitaet aus den Max-Link-Speeds beider Endpunkte:
 // Engpass = min der beiden (>0), sonst der einzige bekannte Wert, sonst 0.
 // Genutzt von build-elements (Weathermap) und render-stats (Forecast).

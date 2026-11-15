@@ -6,9 +6,9 @@ declare(strict_types = 1);
 namespace Modules\NetworkTopology\Actions;
 
 use CCsrfTokenHelper;
+use API;
 use Modules\NetworkTopology\Topology\NodePositions;
 use Modules\NetworkTopology\Topology\Revision;
-use Exception;
 
 /**
  * NetworkTopologyPositions
@@ -27,8 +27,8 @@ use Exception;
  *   shared    module.config — DIE Karte, nur Super-Admins schreiben
  *   personal  CProfile      — die eigene Abweichung davon
  *
- * WRITE-Action. Schutz wie bei network.topology.links: echter CSRF-Token, nur
- * POST, requireAjax(), Drosselung, und scope=shared verlangt Super-Admin. Die
+ * GET returns the effective positions of readable hosts for one map view.
+ * POST requires CSRF, AJAX and Super Admin permission for shared writes. Die
  * Node-IDs validiert NodePositions::sanitize() gegen ein enges Zeichenmuster —
  * sie landen spaeter wieder als Element-IDs im DOM.
  *
@@ -50,13 +50,23 @@ class NetworkTopologyPositions extends NetworkTopologyController {
     }
 
     protected function checkInput(): bool {
-        if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
+        $method = $_SERVER['REQUEST_METHOD'] ?? '';
+        if (!in_array($method, ['GET', 'POST'], true)) {
             $this->jsonResponse(['error' => 'Method not allowed']);
             return false;
         }
 
         if (!$this->requireAjax()) {
             return false;
+        }
+
+        if ($method === 'GET') {
+            if (!$this->validateInput(['view' => 'required|string', 'since' => 'string'])
+                    || !$this->validFollowView((string) $this->getInput('view', ''))) {
+                $this->jsonResponse(['error' => 'Invalid layout view']);
+                return false;
+            }
+            return true;
         }
 
         $ret = $this->validateInput([
@@ -88,6 +98,13 @@ class NetworkTopologyPositions extends NetworkTopologyController {
     }
 
     protected function doAction(): void {
+        if (($_SERVER['REQUEST_METHOD'] ?? '') === 'GET') {
+            if ($this->throttle('positions_read', 24, 10)) {
+                $this->readPositions();
+            }
+            return;
+        }
+
         if (!$this->throttle('positions', 30, 10)) {
             return;
         }
@@ -164,5 +181,48 @@ class NetworkTopologyPositions extends NetworkTopologyController {
             'truncated_views' => NodePositions::lastTruncatedViews(),
             'revision'        => Revision::of($saved)
         ]);
+    }
+
+    private function validFollowView(string $view): bool {
+        return strlen($view) <= 200 && preg_match(
+            '/\A(?:[0-9]{1,20}(?:_[0-9]{1,20})*|host[0-9]{1,20}_h[1-6])\z/', $view
+        ) === 1;
+    }
+
+    private function readPositions(): void {
+        $view = (string) $this->getInput('view');
+        $shared = NodePositions::loadShared();
+        $personal = NodePositions::loadPersonal();
+        $positions = array_replace($shared[$view] ?? [], $personal[$view] ?? []);
+        $hostids = array_values(array_filter(array_map('strval', array_keys($positions)), 'ctype_digit'));
+        $visible = [];
+
+        if ($hostids) {
+            if (preg_match('/\Ahost([0-9]+)_h[1-6]\z/', $view, $root)) {
+                $can_read = API::Host()->get(['hostids' => [$root[1]], 'output' => []]);
+                $scope = [];
+            } else {
+                $groupids = array_values(array_unique(explode('_', $view)));
+                $groups = API::HostGroup()->get(['groupids' => $groupids, 'output' => []]);
+                $can_read = is_array($groups) && count($groups) === count($groupids);
+                $scope = ['groupids' => $groupids];
+            }
+
+            if ($can_read) {
+                $visible = API::Host()->get($scope + [
+                    'hostids' => $hostids, 'output' => [], 'preservekeys' => true
+                ]);
+            }
+        }
+
+        // Check current permissions even if the coordinates have not changed.
+        // Scope the revision and response to this view and its readable hosts.
+        $positions = array_intersect_key($positions, is_array($visible) ? $visible : []);
+        $revision = Revision::of($positions);
+        $response = ['ok' => true, 'revision' => $revision];
+        if (!hash_equals($revision, (string) $this->getInput('since', ''))) {
+            $response['positions'] = (object) $positions;
+        }
+        $this->jsonResponse($response);
     }
 }

@@ -236,7 +236,9 @@ export function buildNodeElements(nodes, perfMode) {
             _macFlap: n.mac_flap === true,
             _macFlapN: (typeof n.mac_flap_n === 'number') ? n.mac_flap_n : null,
             type: n.type, host: n.host, ip: n.ip, iftype: n.iftype,
+            layout_tier: n.layout_tier,
             groups: n.groups, _primaryGroup: n._primaryGroup,
+            _connectedGroups: n._connectedGroups, _sharedAfter: n._sharedAfter,
             // Proxy-Felder durchreichen. Sie fehlten hier, und das schlug an
             // ZWEI Stellen durch, die beide aus n.data() lesen:
             //   - detail-panel.js baut daraus die "via <Proxy>"-Zeile; sie war

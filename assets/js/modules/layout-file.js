@@ -224,22 +224,10 @@ export function readLayoutFile(file) {
     });
 }
 
-/**
- * Wendet einen geprueften Teilzustand an — ueberlagernd, nie ersetzend.
- *
- * Positionen setzen das Skip-Flag: der durch den anschliessenden Re-Render
- * ausgeloeste layoutstop darf die gerade gemergten Positionen NICHT mit dem
- * (im Cluster-Modus neu berechneten) Layout-Stand ueberschreiben. Gezeichnet
- * werden die Positionen nach den normalen Regeln der Ansicht; im Cluster-Modus
- * weist der bestehende cluster.overrides_positions-Hinweis darauf hin, dass das
- * adaptive Layout sie erst nach einem 'Raster aus' zeigt.
- */
+/** Merge a validated layout file into the existing view. */
 export function importLayout(data) {
     if (!data || typeof data !== 'object') return;
-    if (data.positions) {
-        window._ntSkipNextLayoutSave = true;
-        mergePositions(data.positions, data.posGrp === true);
-    }
+    if (data.positions) mergePositions(data.positions, data.posGrp === true);
     if (data.pinned) mergePinned(data.pinned);
     if (data.notes)  mergeNotes(data.notes);
     if (data.links)  mergeLinks(data.links);

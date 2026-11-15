@@ -14,12 +14,13 @@
 //     Zirkulardependenz (render-tech.js → toolbar.js → render-tech.js).
 //     Lösung: setRenderCallback() injiziert die render-Funktion vom Hauptmodul.
 
+import { fitTopology } from './layout-spacing.js';
 import { loadGroupOpen, saveGroupOpen } from './storage.js';
 import { NT_LLDP_KEY, NT_WEATHERMAP_KEY, NT_LINKQUALITY_KEY, NT_GROUP_VIEW_KEY, NT_GROUP_CLUSTER_KEY, NT_PERF_KEY,
-    isGroupViewEffective,
+    isGroupViewEffective, layoutFollowView, loadClusterMode,
          loadGhostMode, saveGhostMode,
          loadBundleMode, saveBundleMode,
-         clearPositions, savePositions, savePinned, clearLinks, defaultLinkScope,
+         savePositions, savePinned, clearLinks, defaultLinkScope,
          loadLayout, saveLayout,
          loadNodeSize, saveNodeSize, nextNodeSize, nodeSizeFactor,
          loadRings, saveRings, loadExpected, saveExpected,
@@ -50,10 +51,12 @@ import { isLinkModeActive, enterLinkMode, exitLinkMode } from './manual-links.js
 import { setupExportMenu } from './export.js';
 import { setupFdbFinder } from './fdb-finder.js';
 import { addHistoryButton } from './history-mode.js';
-import { LAYOUT_OPTIONS, buildLayoutConfig } from './layouts.js';
+import { LAYOUT_OPTIONS, buildLayoutConfig, shouldClusterGroups } from './layouts.js';
 import { setupPresetsUI } from './presets-ui.js';
 import { buildSevFilter } from './sev-filter.js';
 import { runGroupClusterLayout } from './group-cluster-layout.js';
+import { setupLayoutFollow } from './layout-follow.js';
+import { updateGroupOutlines } from './group-hulls.js';
 import { configureLayoutHistory, recordBefore, undoLayout, redoLayout,
          canUndo, canRedo } from './layout-history.js';
 
@@ -67,6 +70,8 @@ export function setRenderCallback(fn) { _renderFn = fn; }
 // Aufbau den vorigen abmelden kann (siehe unten).
 let _layoutDocClose = null;
 let _vlanDocClose = null;
+let _clusterDocClose = null;
+let fullscreenFitTimer = null;
 
 export function setupToolbar(cy, wrap, nodes, groupNames, isDark, useLayout) {
     const bar = document.querySelector('.nt-topbar__actions');
@@ -115,12 +120,26 @@ export function setupToolbar(cy, wrap, nodes, groupNames, isDark, useLayout) {
         const neu_ = alt_.cloneNode(true);
         alt_.parentNode.replaceChild(neu_, alt_);
         neu_.addEventListener('click', function() {
+            // A manual zoom during the fullscreen transition supersedes its fit.
+            if (fullscreenFitTimer !== null) {
+                clearTimeout(fullscreenFitTimer);
+                fullscreenFitTimer = null;
+                cy.resize();
+            }
             cy.zoom({ level: cy.zoom() * faktor,
                       renderedPosition: { x: wrap.clientWidth / 2, y: wrap.clientHeight / 2 } });
         });
     };
     zoomBtn('nt-btn-zoom-in',  1.3);
     zoomBtn('nt-btn-zoom-out', 0.77);
+    const zoomLabel = document.getElementById('nt-zoom-label');
+    if (zoomLabel) {
+        const updateZoomLabel = function() {
+            zoomLabel.textContent = Math.round(cy.zoom() * 100) + '%';
+        };
+        cy.on('zoom', updateZoomLabel);
+        updateZoomLabel();
+    }
 
     // Hide Labels
     const bLbl = document.getElementById('nt-btn-labels');
@@ -146,7 +165,7 @@ export function setupToolbar(cy, wrap, nodes, groupNames, isDark, useLayout) {
     // fullscreenchange-Listener unten fuehren (der laeuft auch, wenn der User mit
     // Esc rausgeht), und eine Ablehnung sichtbar melden statt sie zu verschlucken.
     const bFs = document.getElementById('nt-btn-fullscreen');
-    if (bFs) bFs.addEventListener('click', function() {
+    if (bFs) bFs.onclick = function() {
         const root = document.getElementById('nt-root');
         const drin = !!(document.fullscreenElement || document.webkitFullscreenElement);
         try {
@@ -171,7 +190,7 @@ export function setupToolbar(cy, wrap, nodes, groupNames, isDark, useLayout) {
         } catch (err) {
             toast(t('toolbar.fullscreen.denied', { err: (err && err.message) || '?' }), 'warn', 8000);
         }
-    });
+    };
     // Fullscreen-Toggle aendert die Canvas-Groesse, aber Cytoscape bekommt
     // das nicht selbst mit — ohne expliziten cy.resize() + cy.fit() rutschen
     // Nodes aus dem sichtbaren Bereich. Listener nur einmal pro Page anhaengen
@@ -181,10 +200,12 @@ export function setupToolbar(cy, wrap, nodes, groupNames, isDark, useLayout) {
         const _onFsChange = function() {
             // 100ms Verzoegerung: Browser braucht einen Tick um die neue
             // Canvas-Groesse zu applizieren bevor cy.resize() korrekte Werte sieht.
-            setTimeout(function() {
+            clearTimeout(fullscreenFitTimer);
+            fullscreenFitTimer = setTimeout(function() {
+                fullscreenFitTimer = null;
                 if (window._ntCy && !window._ntCy.destroyed()) {
                     window._ntCy.resize();
-                    window._ntCy.fit(window._ntCy.nodes(), 40);
+                    fitTopology(window._ntCy);
                 }
             }, 100);
             // Fullscreen-Button-Label sync (wichtig wenn User mit Esc statt
@@ -219,7 +240,7 @@ export function setupToolbar(cy, wrap, nodes, groupNames, isDark, useLayout) {
         // Der Grund stimmt — er greift nur woanders: an den Layout-Knoepfen,
         // an dragfree und an layoutstop, wo dieser Schutz auch steht. HIER
         // faellt der Aufruf ganz weg, weil es nichts zu schuetzen gibt.
-        cy.fit(cy.nodes(), 40);
+        fitTopology(cy);
     });
 
     // Layout-Auswahl als Dropdown (Auto / Force / Konzentrisch / Raster / Baum).
@@ -234,9 +255,9 @@ export function setupToolbar(cy, wrap, nodes, groupNames, isDark, useLayout) {
         const oldBtn = document.getElementById('nt-btn-layout');
         if (oldBtn) oldBtn.remove();
 
-        const wrap = document.createElement('div');
-        wrap.id = 'nt-layout-wrap';
-        wrap.style.cssText = 'position:relative;display:inline-block;margin-left:4px';
+        const layoutWrap = document.createElement('div');
+        layoutWrap.id = 'nt-layout-wrap';
+        layoutWrap.style.cssText = 'position:relative;display:inline-block;margin-left:4px';
 
         const btn = document.createElement('button');
         btn.className = 'btn-alt btn-small';
@@ -284,39 +305,36 @@ export function setupToolbar(cy, wrap, nodes, groupNames, isDark, useLayout) {
                 // einer neuen Position obwohl sie eigentlich genau den Sinn
                 // haben "stay where I put you". Jetzt: locked bleiben locked,
                 // Cytoscape's Layouts respektieren das und ueberspringen sie.
-                // In focus mode do NOT touch the stored positions:
-                // clearPositions wipes the whole view layer, and the saves
-                // below would write back only the focus subset. The layout
-                // switch then acts only ephemerally on the excerpt.
-                if (!isFocusActive()) clearPositions();
+                // Save only once the new layout is known; never clear the
+                // server's copy ahead of time.
                 cy.resize();
 
                 // Wenn Cluster-Mode aktiv ist (>=2 Gruppen + nicht 'off') muss
                 // der gewaehlte Layout PER CLUSTER laufen, sonst zerschiesst
                 // ein globales Grid/Baum/Hierarchie die Gruppen-Boundaries.
-                let _clusterMode = 'auto';
-                try {
-                    const s = localStorage.getItem(NT_GROUP_CLUSTER_KEY);
-                    if (s === 'auto' || s === 'columns' || s === 'rows' || s === 'off') _clusterMode = s;
-                } catch (e) {}
-                const _useCluster = groupNames && groupNames.length >= 2 && _clusterMode !== 'off';
+                const _clusterMode = isGroupViewEffective() ? 'off' : loadClusterMode();
+                const _useCluster = shouldClusterGroups(opt.id, nodes, groupNames.length, _clusterMode);
+                updateGroupOutlines(cy, wrap, groupNames, _clusterMode, _useCluster);
 
                 if (_useCluster) {
                     runGroupClusterLayout(cy, groupNames, _clusterMode, function() {
                         setTimeout(function() {
+                            if (cy.destroyed() || window._ntCy !== cy) return;
                             if (!isFocusActive()) { savePositions(cy); savePinned(cy); }
                             // Bei der Fit nur ueber NICHT-pinned Nodes — sonst
                             // koennten Pins ausserhalb des fit-Bereichs liegen
                             // und nach Layout abgeschnitten sein.
-                            cy.fit(cy.nodes(), 30);
+                            fitTopology(cy, cy.nodes(), 30);
                         }, 200);
                     }, opt.id);
                 } else {
-                    const lo = cy.layout(buildLayoutConfig(opt.id, nodes, [], true));
+                    const lo = cy.layout(buildLayoutConfig(opt.id, nodes,
+                        cy.edges().filter(e => !e.data('isGroupEdge')).map(e => e.data()), true));
                     lo.one('layoutstop', function() {
                         setTimeout(function() {
+                            if (cy.destroyed() || window._ntCy !== cy) return;
                             if (!isFocusActive()) { savePositions(cy); savePinned(cy); }
-                            cy.fit(cy.nodes(), 40);
+                            fitTopology(cy);
                         }, 400);
                     });
                     lo.run();
@@ -354,9 +372,9 @@ export function setupToolbar(cy, wrap, nodes, groupNames, isDark, useLayout) {
         _layoutDocClose = function() { menu.style.display = 'none'; };
         document.addEventListener('click', _layoutDocClose);
 
-        wrap.appendChild(btn);
-        wrap.appendChild(menu);
-        if (bar && isFirstRun) bar.appendChild(wrap);
+        layoutWrap.appendChild(btn);
+        layoutWrap.appendChild(menu);
+        if (bar && isFirstRun) bar.appendChild(layoutWrap);
     })();
 
     // VLAN-Waehler — NUR wenn der Graph VLAN-Daten traegt (NT VLAN by SNMP).
@@ -577,12 +595,6 @@ export function setupToolbar(cy, wrap, nodes, groupNames, isDark, useLayout) {
     // nicht trennen. Der Schalter liess sich trotzdem umstellen und schwieg
     // dazu. Gemeldet aus dem Feld: "zwischen Reihen und Spalten sehe ich
     // keinen Unterschied". Es gab keinen.
-    const loadClusterMode = function() {
-        let v = null;
-        try { v = localStorage.getItem(NT_GROUP_CLUSTER_KEY); } catch (e) {}
-        return (v === 'auto' || v === 'columns' || v === 'rows' || v === 'off') ? v : 'auto';
-    };
-
     const _gruppenAufDerKarte = function() {
         const d = window._ntLastData || {};
         const gesehen = {};
@@ -637,7 +649,10 @@ export function setupToolbar(cy, wrap, nodes, groupNames, isDark, useLayout) {
     // - columns: immer Spalten
     // - rows: immer Reihen
     // - off: kein Cluster, normales Force-Layout
-    if (bar && isFirstRun && !document.getElementById('nt-cluster-wrap')) {
+    if (bar) {
+        const existing = document.getElementById('nt-cluster-wrap');
+        if (existing) existing.remove();
+        if (_clusterDocClose) document.removeEventListener('click', _clusterDocClose);
         const clusterWrap = document.createElement('div');
         clusterWrap.id = 'nt-cluster-wrap';
         clusterWrap.style.cssText = 'position:relative;display:inline-block;margin-left:4px';
@@ -648,14 +663,12 @@ export function setupToolbar(cy, wrap, nodes, groupNames, isDark, useLayout) {
         // und Haekchen blieben auf dem Wert von der Toolbar-Erstellung stehen,
         // und ein Schalter, der die Wahl nicht anzeigt, hat sie nicht
         // angenommen.
-        let cMode = (function() {
-            try { return localStorage.getItem(NT_GROUP_CLUSTER_KEY) || 'auto'; }
-            catch (e) { return 'auto'; }
-        })();
+        let cMode = loadClusterMode();
         const labels = {
             auto:    t('toolbar.cluster.auto'),
             columns: t('toolbar.cluster.columns'),
             rows:    t('toolbar.cluster.rows'),
+            colors:  t('toolbar.cluster.colors'),
             off:     t('toolbar.cluster.off'),
         };
 
@@ -679,7 +692,7 @@ export function setupToolbar(cy, wrap, nodes, groupNames, isDark, useLayout) {
         cMenu.style.cssText = 'position:absolute;top:100%;left:0;background:var(--nt-surface);'
             + 'border:1px solid var(--nt-line);border-radius:4px;box-shadow:0 4px 12px rgba(0,0,0,0.08);'
             + 'min-width:170px;z-index:300;display:none;margin-top:2px';
-        ['auto', 'columns', 'rows', 'off'].forEach(function(opt) {
+        Object.keys(labels).forEach(function(opt) {
             const item = document.createElement('div');
             item.textContent = labels[opt];
             item.dataset.mode = opt;
@@ -697,6 +710,7 @@ export function setupToolbar(cy, wrap, nodes, groupNames, isDark, useLayout) {
             item.addEventListener('click', function(e) {
                 e.stopPropagation();
                 const newMode = this.dataset.mode;
+                const previousMode = cMode;
                 try { localStorage.setItem(NT_GROUP_CLUSTER_KEY, newMode); } catch (e2) {}
                 cMode = newMode;
                 _setClusterLabel();
@@ -706,6 +720,10 @@ export function setupToolbar(cy, wrap, nodes, groupNames, isDark, useLayout) {
                     kind.style.fontWeight = aktiv ? '600' : '400';
                 });
                 cMenu.style.display = 'none';
+                if (['off', 'colors'].includes(previousMode) && ['off', 'colors'].includes(newMode)) {
+                    if (!isGroupViewEffective()) updateGroupOutlines(cy, wrap, groupNames, newMode, false);
+                    return;
+                }
                 // Re-Render mit neuem Mode
                 const d = window._ntLastData || {};
                 if (d.nodes && d.nodes.length) {
@@ -720,7 +738,8 @@ export function setupToolbar(cy, wrap, nodes, groupNames, isDark, useLayout) {
             e.stopPropagation();
             cMenu.style.display = cMenu.style.display === 'none' ? 'block' : 'none';
         });
-        document.addEventListener('click', function() { cMenu.style.display = 'none'; });
+        _clusterDocClose = function() { cMenu.style.display = 'none'; };
+        document.addEventListener('click', _clusterDocClose);
 
         bar.appendChild(clusterWrap);
     }
@@ -734,6 +753,19 @@ export function setupToolbar(cy, wrap, nodes, groupNames, isDark, useLayout) {
         this.textContent = window._ntRefreshOn ? _autoAn() : t('toolbar.auto.off');
         this.style.opacity = window._ntRefreshOn ? '1' : '0.5';
     });
+
+    const bFollow = mkbtn('nt-btn-follow-layout', '', null);
+    bFollow.disabled = !layoutFollowView();
+    bFollow.title = t('toolbar.follow.tip');
+    const followLabels = {
+        on: t('toolbar.follow.on'), off: t('toolbar.follow.off'),
+        waiting: t('toolbar.follow.waiting'), retry: t('toolbar.follow.retry')
+    };
+    const toggleFollow = setupLayoutFollow(cy, function(state) {
+        bFollow.textContent = followLabels[state];
+        bFollow.setAttribute('aria-pressed', state !== 'off' ? 'true' : 'false');
+    });
+    bFollow.addEventListener('click', toggleFollow);
 
     // LLDP-Kanten ein/aus
     let _lldpVisible = localStorage.getItem(NT_LLDP_KEY) !== '0';
@@ -935,7 +967,7 @@ export function setupToolbar(cy, wrap, nodes, groupNames, isDark, useLayout) {
             collapseLeaves(c);
             setCollapsePref(true);
         }
-        c.fit(c.elements(':visible'), 40);
+        fitTopology(c, c.elements(':visible'));
     });
 
     // Root-Cause-Analyse: Offline-Hosts in Ursache vs. Folge trennen

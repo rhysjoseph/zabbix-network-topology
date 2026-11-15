@@ -350,6 +350,9 @@ export function showDetail(panel, d, cy) {
     } else {
         identitaet.push(idRow('IP', d.ip || '—'));
         identitaet.push(idRow('Interface', ifaceCell()));
+        if (d._connectedGroups && d._connectedGroups.length) {
+            identitaet.push(idRow(t('detail.connected_groups'), d._connectedGroups.join(', ')));
+        }
     }
 
     // Metrik-Numeric-Liste (zusaetzlich zu den Rings — gibt exakte Werte
