@@ -4,13 +4,89 @@ Changes since the first public release. Versioning: MAJOR.MINOR.PATCH.
 
 ## Production fork additions
 
-### Fixed
+Updated 2026-11-15 for the fork based on upstream v5.6.12.
+
+### Layout and grouping
+
+- **Optional device tiers.** The `nt:tier` host tag drives Hierarchy rows and
+  Concentric rings. Use `spine` or `core` for the centre, `leaf` or
+  `distribution` for the first ring, `access` for the second ring, and
+  `endpoint` for the outer tier. In a tagged Concentric view, untagged devices
+  sit beyond the access ring. With no tier tags, Concentric still arranges
+  devices by link count.
+- **More space between devices and groups.** Automatic layouts reduce node
+  and label overlaps. Rows and Columns give each group its own space
+  and wrap larger groups. Colours only adds device rings and a legend to the
+  current layout. Group names ending in Red or Blue use the corresponding
+  colour. In grouped layouts, endpoints with LLDP, CDP, or declared uplinks
+  into several groups can sit in a shared area with each cable visible.
+- **Cluster Auto in tiered layouts.** Tagged Hierarchy and Concentric can
+  arrange several groups in one layout. Dashed boundaries, translucent group
+  fills, device rings and a legend identify the groups. The outlines and fills
+  are redrawn when returning to Technical, including in fullscreen.
+
+### Saved positions and fullscreen
+
+- **Follow layout.** An already-open kiosk or second browser can pick up
+  saved positions for the selected map without a reload and keep its own zoom
+  and pan. Follow is optional per tab and pauses position editing in that tab.
+  Position reads respect the viewer’s current Zabbix host visibility.
+- **Keep manual adjustments through discovery.** An LLDP topology change can
+  update membership and cables while retaining existing device positions, pan
+  and zoom. Metric-only refreshes update the existing graph. Automatically
+  generated positions stay local until the user saves edits.
+- **Fullscreen controls.** Wrapped toolbar buttons respond across their labels
+  and padding. View, Layout and Tools menus, MAC lookup, Export and other
+  popups open inside the fullscreen view. The zoom readout stays in sync, and
+  returning to Technical restores the selected layout.
+
+### Rebuild performance and refresh
+
+- **Reuse the last successful map while one request rebuilds.** The server
+  shares snapshots across tabs and devices for the same user and map
+  selection. A snapshot is fresh for 30 seconds and expires after 60 seconds.
+  Before serving a stale snapshot, the server checks that every monitored host
+  in it is still visible to that user. If visibility cannot be confirmed, or
+  no usable snapshot exists, the browser retries while the rebuild runs.
+- **Independent browser refreshes.** Each tab schedules its next poll after
+  the current request finishes. Staggered polls reduce simultaneous requests,
+  late responses cannot replace newer snapshots, and the map shows when it
+  is displaying an older snapshot. Topology change notifications skip stale
+  snapshots and retry responses.
+- **Cheaper latest-value queries.** To reduce HTTP 504 errors on cold map
+  loads, compatible MySQL/MariaDB history tables use indexed batch lookups.
+  On clock-partitioned tables the reader works from newest to oldest and
+  stops looking for each item as soon as it finds its latest sample. It
+  retains the original timestamp for stale-data detection.
+- **Prepare older history outside web requests.** An optional worker and
+  systemd timer prepare the latest values from closed MariaDB history
+  partitions. The frontend reads recent partitions live and uses prepared
+  values only for items visible to the request. Items without a usable
+  prepared value fall back to the database. [Worker setup and requirements](tools/prepared-history/README.md)
+  · [Upstream performance discussion #35](https://github.com/linuser/zabbix-network-topology/issues/35)
+
+### Interface display and recovery
 
 - **Cisco 24-port Front Panel.** Catalyst 1200 and CBS350 switches that number
   copper ports `Gi1`–`Gi24` and uplinks `Te1`–`Te4` now show a 24+4 panel,
   including the `Gi1/0/…` and `Te1/0/…` naming form. Uplink ifIndexes such as
   49–52 retain their status and counters while being drawn in the four uplink
   slots. An undiscovered uplink leaves its slot empty.
+- **Discovered interface labels.** A unique `interface` tag from an interface
+  status item supplies the display name when `ifName` and `ifDescr` are
+  absent. This retains Netgear labels such as `1/0/1` when the template would
+  otherwise leave the map with a numeric port index. Front Panel still
+  requires the corresponding IF-MIB items to be discovered.
+- **Recovery from an empty Technical view.** When a restored severity filter
+  would hide every available node on startup, the page clears that saved
+  filter and shows the map.
+
+The v5.6.12 baseline also carries the previously reported LLDP local-port
+mapping for Arista and Mellanox and the live link-status repaint. See the
+[v5.6.10](#v5610--2026-11-12) and [v5.6.9](#v569--2026-11-11) release notes.
+
+[Layout examples and screenshots](docs/fork-layout-update.md) ·
+[Docker fixtures and browser checks](tools/layout-lab/README.md)
 
 ## v5.6.12 — 2026-11-14
 
