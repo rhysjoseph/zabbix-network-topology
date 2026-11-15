@@ -69,7 +69,7 @@ export function exitLinkMode() {
     if (bLinkBtn) {
         bLinkBtn.style.background = '';
         bLinkBtn.style.color = '';
-        bLinkBtn.textContent = 'Link';
+        bLinkBtn.textContent = t('toolbar.link');
     }
     const wrap = document.getElementById('nt-canvas-wrap');
     if (wrap) wrap.style.cursor = '';

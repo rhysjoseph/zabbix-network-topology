@@ -226,6 +226,26 @@ export const NT_ITEMS_PATTERN_KEY  = 'nt_' + PFX + 'items_pattern';
 export const NT_ITEMS_HIDE_EMPTY_KEY = 'nt_' + PFX + 'items_hide_empty';
 export const NT_ITEMS_HEATMAP_KEY    = 'nt_' + PFX + 'items_heatmap';
 export const NT_GROUP_CLUSTER_KEY  = 'nt_' + PFX + 'group_cluster';   // 'auto'|'columns'|'rows'|'off'
+const NT_FOLLOW_LAYOUT_KEY = 'nt_' + PFX + 'follow_layout';
+
+export function loadClusterMode() {
+    let mode;
+    try { mode = localStorage.getItem(NT_GROUP_CLUSTER_KEY); } catch (e) {}
+    return ['auto', 'columns', 'rows', 'colors', 'off'].includes(mode) ? mode : 'auto';
+}
+
+export function layoutFollowView() {
+    return isGroupViewEffective() ? '' : selectedGroupIds();
+}
+
+export function followsLayout() {
+    try { return !!layoutFollowView() && window.sessionStorage.getItem(NT_FOLLOW_LAYOUT_KEY) === '1'; }
+    catch (e) { return false; }
+}
+
+export function setFollowLayout(on) {
+    try { window.sessionStorage.setItem(NT_FOLLOW_LAYOUT_KEY, on ? '1' : '0'); } catch (e) {}
+}
 
 // ── Einmalige Migration der Legacy-Keys ──────────────────────────────────────
 // Kopiert (nicht verschiebt) Legacy-Daten in die User-scoped Keys, damit andere
@@ -534,6 +554,7 @@ function _cleanPositions(pos) {
  * auseinander.
  */
 function _writePositions(pos, view) {
+    if (followsLayout()) return;
     if (defaultPositionScope() === SCOPE_SHARED) {
         // Der Super-Admin pflegt die Karte: seine Anordnung IST sie, komplett.
         _posShared[view] = pos;
@@ -618,6 +639,7 @@ export function setPositions(pos, groupView) {
 
 /** Setzt die eigene Ebene fuer die aktuelle Ansicht zurueck. */
 export function clearPositions() {
+    if (followsLayout()) return;
     const view  = posViewKey();
     const scope = defaultPositionScope();
     const store = scope === SCOPE_SHARED ? _posShared : _posPersonal;

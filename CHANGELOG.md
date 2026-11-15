@@ -2,6 +2,18 @@
 
 Changes since the first public release. Versioning: MAJOR.MINOR.PATCH.
 
+## v5.6.13 — Unreleased
+
+### Added
+
+- Group colours and optional device tiers for Hierarchy and Concentric layouts.
+  Open displays can follow saved positions while keeping their camera settings.
+
+### Fixed
+
+- Improve spacing for grouped maps and keep fullscreen controls usable.
+- Keep device positions, zoom and pan when discovery changes the map.
+
 ## v5.6.12 — 2026-11-14
 
 ### Fixed

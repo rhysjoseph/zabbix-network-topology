@@ -74,18 +74,22 @@ export function statusColor(d) {
     return SEV_COL[klemme(d && d.severity)];
 }
 
-const GRP_COLORS = ['#3b82f6', '#22c55e', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4',
-                    '#f97316', '#ec4899', '#14b8a6', '#84cc16', '#6366f1', '#e11d48'];
+const GRP_COLORS = ['#22c55e', '#f59e0b', '#8b5cf6', '#06b6d4',
+                    '#f97316', '#ec4899', '#14b8a6', '#84cc16', '#6366f1'];
 
-const _gcMap = {};
+const _gcMap = new Map();
 let _gcIdx = 0;
 
 export function grpColor(name) {
     if (!name) return '#94a3b8';
-    if (!_gcMap[name]) {
-        _gcMap[name] = GRP_COLORS[_gcIdx++ % GRP_COLORS.length];
+    // Only the visible group label must name a colour, not a parent path.
+    const label = name.slice(name.lastIndexOf('/') + 1).trim();
+    if (/(?:^|[\s_-])red$/i.test(label)) return '#ef4444';
+    if (/(?:^|[\s_-])blue$/i.test(label)) return '#3b82f6';
+    if (!_gcMap.has(name)) {
+        _gcMap.set(name, GRP_COLORS[_gcIdx++ % GRP_COLORS.length]);
     }
-    return _gcMap[name];
+    return _gcMap.get(name);
 }
 
 // primaryGroup ist eng mit Gruppen verknüpft, daher hier:

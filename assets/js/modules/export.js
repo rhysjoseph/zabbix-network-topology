@@ -13,14 +13,14 @@
 // inline <style>-Block) mit aktuellem Stand der Hosts. Optionaler
 // Map-Screenshot via cy.png() wird oben eingebettet.
 
-import { esc, fmt } from './utils.js';
+import { esc, fmt, mountFloatingUi } from './utils.js';
+import { closeToolbarPopover, toggleToolbarPopover } from './toolbar-popover.js';
 import { buildGraphml } from './graphml.js';
 import { buildNetboxCsv, netboxBericht } from './netbox.js';
 
 // Ein einziger Document-Close-Handler (schliesst das Dropdown bei Aussenklick).
 // Modul-Level, damit setupExportMenu ihn vor dem Neu-Anlegen entfernen kann —
 // sonst sammelt sich pro Re-Render (im Group-View alle 30s) ein Listener an.
-let _expDocClose = null;
 import { loadLinks } from './storage.js';
 import { statsByGroup, scoreColor, scoreLabel } from './render-health.js';
 import { COMPLIANCE_CHECKS, fetchComplianceData } from './render-compliance.js';
@@ -431,7 +431,7 @@ export function ntShowExportOverlay(png, printMode) {
         + '<img src="' + png + '" style="max-width:95vw;max-height:85vh;display:block;'
         + 'border-radius:4px;box-shadow:0 8px 32px rgba(0,0,0,0.5)"/>';
     ov.addEventListener('click', function() { ov.remove(); });
-    document.body.appendChild(ov);
+    mountFloatingUi(ov);
     if (printMode) setTimeout(function() { window.print(); }, 500);
 }
 
@@ -451,6 +451,7 @@ export function setupExportMenu(bar, isFirstRun) {
     expBtn.className = 'btn-alt btn-small';
     expBtn.style.margin = '0';
     expBtn.textContent = '⬇ Export';
+    expBtn.setAttribute('aria-expanded', 'false');
 
     const expMenu = document.createElement('div');
     // Rechtsbuendig statt linksbuendig: der Export-Knopf steht am rechten Ende
@@ -471,7 +472,7 @@ export function setupExportMenu(bar, isFirstRun) {
         row.innerHTML = '<span>' + icon + '</span><span>' + esc(label) + '</span>';
         row.addEventListener('mouseover', function() { this.style.background = 'var(--nt-surface-2,#f8fafc)'; });
         row.addEventListener('mouseout',  function() { this.style.background = ''; });
-        row.addEventListener('click', function() { expMenu.style.display = 'none'; fn(); });
+        row.addEventListener('click', function() { closeToolbarPopover(); fn(); });
         expMenu.appendChild(row);
     }
 
@@ -651,11 +652,8 @@ export function setupExportMenu(bar, isFirstRun) {
 
     expBtn.addEventListener('click', function(e) {
         e.stopPropagation();
-        expMenu.style.display = expMenu.style.display === 'none' ? 'block' : 'none';
+        toggleToolbarPopover(expBtn, expMenu);
     });
-    if (_expDocClose) document.removeEventListener('click', _expDocClose);
-    _expDocClose = function() { expMenu.style.display = 'none'; };
-    document.addEventListener('click', _expDocClose);
 
     expWrap.appendChild(expBtn);
     expWrap.appendChild(expMenu);

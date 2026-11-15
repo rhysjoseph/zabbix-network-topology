@@ -28,7 +28,7 @@
 // nirgends nachlesen, nur messen. Genau dafuer ist die Matrix da.
 
 import { t } from './i18n.js';
-import { isDark, paintAdaptive } from './utils.js';
+import { isDark, paintAdaptive, mountFloatingUi } from './utils.js';
 
 function cfg() {
     return (typeof window !== 'undefined' && window.NT_CONFIG) || {};
@@ -215,5 +215,5 @@ export function showDeviceReport() {
     ov.appendChild(box);
 
     ov.addEventListener('click', function(e) { if (e.target === ov) ov.remove(); });
-    document.body.appendChild(ov);
+    mountFloatingUi(ov);
 }

@@ -12,6 +12,7 @@
 // Geschichte: Diese Datei war einmal 2025 Zeilen. In fünf Refactor-Sessions
 // (v3.6 → v4.0) wurde sie auf eine reine Orchestrierungs-Schicht reduziert.
 
+import { fitTopology } from './modules/layout-spacing.js';
 import { esc } from './modules/utils.js';
 import { t } from './modules/i18n.js';
 import { toastTruncatedOnce, toast } from './modules/toast.js';
@@ -325,7 +326,7 @@ function init() {
         fixHeight();
         if (window._ntCy) {
             window._ntCy.resize();
-            window._ntCy.fit(window._ntCy.nodes(), 40);
+            fitTopology(window._ntCy);
         }
     });
 

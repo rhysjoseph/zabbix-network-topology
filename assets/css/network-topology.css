@@ -85,6 +85,8 @@
 
 .nt-topbar__actions {
     display: flex;
+    min-width: 0;
+    max-width: 100%;
     align-items: center;
     gap: 4px;
     margin-left: auto;
@@ -95,6 +97,35 @@
     flex-wrap: wrap;
     justify-content: flex-end;
     row-gap: 4px;
+}
+
+#nt-zoom-label {
+    display: inline-block;
+    min-width: 4ch;
+    text-align: center;
+}
+
+/* Show the whole button target in fullscreen, including the label. */
+#nt-root:fullscreen .nt-topbar__actions :is(
+    #nt-btn-zoom-in, #nt-btn-zoom-out, #nt-menu-view, #nt-menu-layout, #nt-menu-tools,
+    #nt-btn-ghosts, #nt-btn-bundle, #nt-fdb-wrap > button, #nt-export-wrap > button,
+    #nt-btn-collapse, #nt-btn-nodesize, #nt-btn-expected, #nt-btn-rings, #nt-btn-linkquality,
+    #nt-sev-filter button
+):enabled {
+    cursor: pointer;
+    user-select: none;
+}
+
+#nt-root:fullscreen .nt-topbar__actions :is(
+    #nt-btn-zoom-in, #nt-btn-zoom-out, #nt-menu-view, #nt-menu-layout, #nt-menu-tools,
+    #nt-btn-ghosts, #nt-btn-bundle, #nt-fdb-wrap > button, #nt-export-wrap > button,
+    #nt-btn-collapse, #nt-btn-nodesize, #nt-btn-expected, #nt-btn-rings, #nt-btn-linkquality,
+    #nt-sev-filter button
+):enabled:is(:hover, :focus-visible) {
+    /* These toggles use inline opacity to indicate their idle/off state. */
+    opacity: 1 !important;
+    outline: 1px solid currentColor;
+    outline-offset: -2px;
 }
 
 /* ── Canvas ──────────────────────────────────────────────── */

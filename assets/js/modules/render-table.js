@@ -14,7 +14,7 @@
 //
 // Sortierung: Klick auf Spalten-Header. Default: Status-DESC (kritischste oben).
 
-import { esc, fmt, aggregateValues, isDark, hostEditUrl, paintAdaptive } from './utils.js';
+import { esc, fmt, aggregateValues, isDark, hostEditUrl, paintAdaptive, mountFloatingUi } from './utils.js';
 import { SEV_COL, SEV_LBL, grpColor, statusLabel, statusColor } from './severity.js';
 import { meta as qualiMeta, QUALITY } from './quality.js';
 import { t } from './i18n.js';
@@ -1462,7 +1462,7 @@ export function renderTable(wrap, nodes, edges) {
         + ';border-radius:10px;padding:14px;color:' + theme.text + ';'
         + 'box-shadow:0 8px 24px rgba(0,0,0,0.12);z-index:200;display:none;'
         + 'max-height:calc(100vh - 200px);overflow-y:auto';
-    document.body.appendChild(detailPanel);
+    mountFloatingUi(detailPanel);
 
     function rerenderTable() {
         _urlSync();

@@ -15,30 +15,19 @@ import { el, isDark, paintAdaptive } from './utils.js';
 import { fetchJson } from './http.js';
 import { meta as qualiMeta, QUALITY, classify } from './quality.js';
 import { t } from './i18n.js';
+import { closeToolbarPopover, toggleToolbarPopover } from './toolbar-popover.js';
 
 // FDB altert (~300 s) und wird alle paar Minuten geholt: aelter als das hier
 // heisst „nicht mehr frisch gemessen".
 const FDB_STALE_S = 900;
 
 let _panel = null;
-let _docClose = null;
 
 /** URL der FDB-Suche aus der Data-URL ableiten (wie edge-detail fuer spark). */
 function searchUrl(mac) {
     const cfg = window.NT_CONFIG || {};
     const base = (cfg.data_url || '').replace('network.topology.data', 'network.topology.fdb_search');
     return base + '&mac=' + encodeURIComponent(mac);
-}
-
-function closePanel() {
-    if (_panel && _panel.parentNode) {
-        _panel.parentNode.removeChild(_panel);
-    }
-    _panel = null;
-    if (_docClose) {
-        document.removeEventListener('click', _docClose);
-        _docClose = null;
-    }
 }
 
 function agoText(ts) {
@@ -179,11 +168,11 @@ function doSearch(mac, box) {
     box.textContent = '';
     box.appendChild(el('div', 'font-size:12px;color:var(--nt-muted)', t('fdb.searching')));
     fetchJson(searchUrl(mac)).then(function(data) {
-        if (_panel) {
+        if (_panel && _panel.contains(box)) {
             renderResult(data || {}, box);
         }
     }).catch(function(e) {
-        if (_panel) {
+        if (_panel && _panel.contains(box)) {
             box.textContent = '';
             box.appendChild(el('div', 'font-size:12px;color:var(--nt-warn-text)',
                 t('fdb.error') + (e && e.message ? ' — ' + e.message : '')));
@@ -191,7 +180,7 @@ function doSearch(mac, box) {
     });
 }
 
-function openPanel(wrap) {
+function openPanel(wrap, trigger) {
     const p = el('div', 'position:absolute;top:100%;right:0;z-index:9999;margin-top:4px;'
         + 'width:340px;max-height:60vh;overflow:auto;'
         + 'background:var(--nt-surface);border:1px solid var(--nt-line);border-radius:8px;'
@@ -236,10 +225,11 @@ function openPanel(wrap) {
 
     wrap.appendChild(p);
     _panel = p;
-    // Aussenklick schliesst — ein Handle, das closePanel wieder abmeldet.
-    _docClose = function() { closePanel(); };
-    document.addEventListener('click', _docClose);
-    setTimeout(function() { input.focus(); }, 0);
+    toggleToolbarPopover(trigger, p, function() {
+        _panel = null;
+        p.remove();
+    });
+    input.focus({preventScroll: true});
 }
 
 /**
@@ -249,6 +239,7 @@ function openPanel(wrap) {
 export function setupFdbFinder(bar, isFirstRun) {
     const existing = document.getElementById('nt-fdb-wrap');
     if (existing) {
+        if (_panel && existing.contains(_panel)) closeToolbarPopover();
         existing.remove();
     }
     const wrap = el('div', 'position:relative;display:inline-block;margin-left:4px');
@@ -258,13 +249,14 @@ export function setupFdbFinder(bar, isFirstRun) {
     btn.className = 'btn-alt btn-small';
     btn.style.margin = '0';
     btn.textContent = '\u{1F50E} ' + t('fdb.button');
+    btn.setAttribute('aria-expanded', 'false');
     btn.addEventListener('click', function(e) {
         e.stopPropagation();
         if (_panel) {
-            closePanel();
+            closeToolbarPopover();
         }
         else {
-            openPanel(wrap);
+            openPanel(wrap, btn);
         }
     });
 

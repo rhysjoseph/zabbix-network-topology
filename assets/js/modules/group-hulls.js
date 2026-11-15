@@ -11,25 +11,71 @@
 //     aber auch nicht in die Nachbar-Spalte blutet (siehe PADDING-Konstante)
 //
 // Ein-/Ausschalten:
-//   - setupGroupHulls(cy, wrap) installiert das Overlay + Listener
-//   - destroyGroupHulls(wrap) entfernt es wieder (für Tab-Wechsel)
-//   - Aufruf-Logik (≥2 Gruppen) liegt im render-tech-Modul
+//   - updateGroupOutlines() setzt Gruppenhüllen und farbige Knotenränder
+//   - destroyGroupHulls() entfernt das Overlay beim Tab-Wechsel
 
 import { grpColor } from './severity.js';
 import { kurzeLabels } from './aggregation.js';
+import { t } from './i18n.js';
 
 const NS = 'http://www.w3.org/2000/svg';
-// Pixel-Abstand zwischen aeusserstem Knoten und Huelle. War 60, aber das hat
-// in Kombination mit dem Cluster-Box-Abstand (group-cluster-layout
-// COLUMN_PADDING=110) regelmaessig zu Hull-Bleed gefuehrt — die Huellen sind
-// 60px nach aussen gezogen, cose laesst nur 20px innen, also 40px Ueberstand
-// pro Box; bei 110px Box-Abstand bleibt nur 30px Sichtgap. 30px Padding
-// reduziert den Ueberstand auf 10px und gibt damit 90px klaren Gap.
-const PADDING = 30;
+// Padding in model coordinates, so hulls also fit on zoomed-out maps.
+const PADDING = 58;
 const LABEL_OFFSET = 18;     // Label-Abstand über dem höchsten Punkt
+const SHARED_COLOUR = '#94a3b8';
 
 let _svg = null;
 let _redrawHandle = null;
+
+function applyGroupColours(cy, wrap, on, groupNames) {
+    const allowed = new Set(groupNames);
+    let hasShared = false;
+    // Seed the same palette order as the legend, including on first render.
+    if (on) groupNames.forEach(grpColor);
+    cy.batch(function() {
+        cy.nodes('[!isGroup]').forEach(function(node) {
+            const group = node.data('_primaryGroup');
+            const shared = on && !!node.data('_sharedAfter');
+            const coloured = shared || (on && allowed.has(group) && !node.data('_isAggregate'));
+            if (shared) hasShared = true;
+            if (coloured) node.data('groupColour', shared ? SHARED_COLOUR : grpColor(group));
+            node.toggleClass('nt-group-colour', coloured);
+            node.toggleClass('nt-shared-endpoint', shared);
+        });
+    });
+    const existing = wrap.querySelector('#nt-group-colour-legend');
+    if (existing) existing.remove();
+    if (!on || !groupNames.length) return;
+
+    const legend = document.createElement('div');
+    legend.id = 'nt-group-colour-legend';
+    legend.style.cssText = 'position:absolute;top:8px;left:8px;z-index:7;'
+        + 'display:flex;flex-wrap:wrap;gap:4px;pointer-events:none;';
+    const labels = kurzeLabels(groupNames);
+    const entries = groupNames.map(name => [labels[name] || name, grpColor(name)]);
+    if (hasShared) entries.push([t('legend.shared_endpoints'), SHARED_COLOUR]);
+    for (const [name, colour] of entries) {
+        const label = document.createElement('span');
+        label.style.cssText = 'display:inline-flex;align-items:center;gap:5px;'
+            + 'padding:3px 8px;border-radius:4px;background:var(--nt-surface);'
+            + 'color:var(--nt-text-2);font-size:11px';
+        const swatch = document.createElement('span');
+        swatch.style.cssText = 'width:9px;height:9px;border-radius:50%;background:' + colour;
+        label.append(swatch, document.createTextNode(name));
+        legend.appendChild(label);
+    }
+    wrap.appendChild(legend);
+}
+
+export function updateGroupOutlines(cy, wrap, groupNames, mode, {packed = false, tiered = false} = {}) {
+    destroyGroupHulls();
+    const autoWithRings = mode === 'auto' && groupNames.length > 1 && !packed;
+    const showColours = mode === 'colors' || autoWithRings;
+    applyGroupColours(cy, wrap, showColours, groupNames);
+    // Groups can cross in a shared tier layout, so keep the node rings and
+    // legend to show membership alongside the tinted group boundaries.
+    if (packed || (autoWithRings && tiered)) setupGroupHulls(cy, wrap, packed);
+}
 
 // Andrew's monotone chain — Convex Hull O(n log n).
 // Eingabe: Array von {x, y}. Ausgabe: Polygon-Punkte im Uhrzeigersinn.
@@ -92,7 +138,7 @@ function clearSvg() {
 
 // Sammelt pro Gruppe die Render-Positionen aller zugehörigen Knoten und
 // zeichnet das Polygon. Wird bei Pan/Zoom/Drag aufgerufen.
-function redraw(cy) {
+function redraw(cy, packed) {
     // Der ResizeObserver kann nach einem Tab-Wechsel noch feuern, waehrend das
     // cy schon zerstoert ist → auf zerstoertem/fehlendem Core nichts tun.
     if (!_svg || !cy || (cy.destroyed && cy.destroyed())) return;
@@ -102,32 +148,36 @@ function redraw(cy) {
     // Knoten ohne valide Position werden übersprungen — kann beim ersten
     // Render auftreten wenn das Layout noch nicht fertig ist und Cytoscape
     // schon ein pan/zoom-Event feuert.
-    const byGroup = {};
-    let _added = 0;
+    const byGroup = new Map();
+    const shared = new Map();
     cy.nodes('[!isGroup]').forEach(function(n) {
         const d = n.data();
         if (d._isInternet || d._isAggregate) return;
-        const g = d._primaryGroup;
+        const g = d._sharedAfter || d._primaryGroup;
         if (!g) return;
         const pos = n.renderedPosition();
         if (!pos || !isFinite(pos.x) || !isFinite(pos.y)) return;
-        _added++;
-        if (!byGroup[g]) byGroup[g] = [];
-        byGroup[g].push({ x: pos.x, y: pos.y });
+        const groups = d._sharedAfter ? shared : byGroup;
+        if (!groups.has(g)) groups.set(g, []);
+        groups.get(g).push({ x: pos.x, y: pos.y });
     });
     // Wenn keine Knoten valid sind, gar nicht zeichnen
-    if (_added === 0) return;
+    if (!byGroup.size && !shared.size) return;
 
     // Pro Gruppe: aufpumpen → Convex Hull → SVG-Polygon
     // Beschriftungen ueber die ganze Menge der gezeichneten Huellen: je das
     // kuerzeste Ende, das diese Gruppe von den anderen unterscheidet. Nur den
     // letzten Abschnitt zu nehmen war zu wenig — zwei Kerne an verschiedenen
     // Standorten standen beide als "Core" nebeneinander.
-    const kurz = kurzeLabels(Object.keys(byGroup));
-    Object.keys(byGroup).forEach(function(g) {
-        const pts = byGroup[g];
+    const kurz = kurzeLabels([...byGroup.keys()]);
+    const entries = [...byGroup].map(([name, pts]) => [name, kurz[name] || name, grpColor(name), pts]);
+    for (const points of shared.values()) {
+        const title = t('legend.shared_endpoints');
+        entries.push([title, title, SHARED_COLOUR, points]);
+    }
+    entries.forEach(function([name, label, col, pts]) {
         if (pts.length === 0) return;
-        const inflated = inflate(pts, PADDING);
+        const inflated = inflate(pts, Math.max(3, PADDING * cy.zoom()));
         const hull = convexHull(inflated);
         if (hull.length < 3) return;
 
@@ -136,7 +186,6 @@ function redraw(cy) {
         const allFinite = hull.every(function(p) { return isFinite(p.x) && isFinite(p.y); });
         if (!allFinite) return;
 
-        const col = grpColor(g);
         const dStr = hull.map(function(p, i) {
             return (i === 0 ? 'M' : 'L') + p.x.toFixed(1) + ',' + p.y.toFixed(1);
         }).join(' ') + ' Z';
@@ -151,6 +200,9 @@ function redraw(cy) {
         path.setAttribute('stroke-dasharray', '6,4');
         path.setAttribute('stroke-linejoin', 'round');
         _svg.appendChild(path);
+
+        // The legend already names each group in the shared hierarchy.
+        if (!packed) return;
 
         // Gruppen-Label über dem höchsten Punkt der Hülle
         let topPoint = hull[0];
@@ -179,17 +231,18 @@ function redraw(cy) {
         // Der volle Pfad bleibt als <title> erreichbar: ueberfahren genuegt,
         // und bei zwei gleichnamigen Blattgruppen an verschiedenen
         // Standorten ist das der Unterschied.
-        text.textContent = kurz[g] || g;
+        text.textContent = label;
         const titel = document.createElementNS(NS, 'title');
-        titel.textContent = g;
+        titel.textContent = name;
         text.appendChild(titel);
         _svg.appendChild(text);
     });
 }
 
-export function setupGroupHulls(cy, wrap) {
+function setupGroupHulls(cy, wrap, packed) {
     if (!cy || !wrap) return;
     ensureSvg(wrap);
+    _svg.dataset.packed = String(packed);
 
     // Listener: bei jeder Position-Änderung neu zeichnen.
     // requestAnimationFrame entkoppelt Cytoscape-Event von Render —
@@ -198,11 +251,13 @@ export function setupGroupHulls(cy, wrap) {
         if (_redrawHandle) return;
         _redrawHandle = requestAnimationFrame(function() {
             _redrawHandle = null;
-            redraw(cy);
+            redraw(cy, packed);
         });
     }
 
-    cy.on('pan zoom drag dragfree position layoutstop', scheduleRedraw);
+    const events = 'pan zoom drag dragfree position layoutstop';
+    cy.on(events, scheduleRedraw);
+    _svg._unbind = function() { cy.off(events, scheduleRedraw); };
     // Resize-Observer auf den Wrap, damit das SVG immer die richtige
     // Pixel-Größe hat (sonst sieht's nach Window-Resize verzerrt aus)
     if (window.ResizeObserver) {
@@ -213,11 +268,12 @@ export function setupGroupHulls(cy, wrap) {
     }
 
     // Initial-Render
-    redraw(cy);
+    redraw(cy, packed);
 }
 
-export function destroyGroupHulls(wrap) {
+export function destroyGroupHulls() {
     if (!_svg) return;
+    _svg._unbind();
     if (_svg._ro) {
         try { _svg._ro.disconnect(); } catch (e) {}
     }

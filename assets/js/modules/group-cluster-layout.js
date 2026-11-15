@@ -1,366 +1,179 @@
-// group-cluster-layout.js — Verteilt Hosts mehrerer Gruppen entweder in
-// vertikale Spalten oder horizontale Reihen.
-//
-// Modi:
-//   'auto'    — adaptiv: 2-3 Gruppen → columns, 4+ Gruppen → rows
-//   'columns' — immer Spalten nebeneinander
-//   'rows'    — immer Reihen untereinander
-//   'off'     — kein Cluster-Layout, normales Force-Layout
-//
-// Wird aufgerufen wenn der gewählte Mode != 'off' und ≥2 Gruppen existieren.
-// Pro Gruppe wird per default ein cose-Layout in der Bounding-Box ausgeführt;
-// optional kann per innerLayoutId-Parameter ein anderes Layout (grid /
-// breadthfirst / concentric / circle) pro Cluster gewählt werden — wird vom
-// Layout-Toggle in der Toolbar gesetzt damit "Raster", "Baum" usw. die
-// Gruppen-Boundaries respektieren.
-// Internet-Knoten und Aggregates werden ausgenommen — sie bekommen eine
-// feste Position (mittig oben).
+// Lay out each host group in model coordinates and place the resulting bounds
+// side by side or one below another. The browser fits the whole map afterward.
 
-// Padding zwischen Cluster-Boxen — Hauptzweck: trennen die Group-Hulls aus
-// group-hulls.js (PADDING=30 outward) so dass deren Bleed-Zonen (effektiv
-// ~10px Überstand pro Hülle bei cose-Inset 20) nie in die Nachbar-Spalte
-// reichen. 110 ist über-konservativ aber gibt einen klaren Sichtgap auch
-// wenn cose Knoten an die Box-Grenzen drückt.
-const COLUMN_PADDING  = 110;
-const ROW_PADDING     = 110;
-const TOP_RESERVE     = 80;
-const BOTTOM_PADDING  = 30;
-const LABEL_OFFSET    = 24;     // Platz oben für Group-Label
-const MIN_COLUMN_W    = 200;    // Minimal-Breite einer Spalte
-const MIN_ROW_H       = 140;    // Minimal-Höhe einer Reihe
+import { buildLayoutConfig, usesTieredLayout } from './layouts.js';
+import { fitTopology, separateLayoutNodes } from './layout-spacing.js';
 
-// Verteilt die verfuegbare Breite/Hoehe proportional zur Knoten-Anzahl der
-// Gruppe — damit kleine Gruppen nicht halb-leere Boxen bekommen, die durch
-// cose noch zusaetzlich auseinandergespreizt werden.
-//
-// counts:    [n1, n2, ...] Knoten-Anzahl pro Gruppe
-// available: nutzbare Pixel (Padding ist schon abgezogen)
-// minSize:   Minimal-Wert pro Box; bleibt garantiert eingehalten.
-//
-// Wenn die Summe der Min-geclampten Boxen das Budget uebersteigt, werden NUR
-// die Boxen die noch >minSize sind proportional zurueckgeshrinkt — die
-// Min-geclampten bleiben am Floor. Konvergenz-Schutz via Iteration mit
-// Abbruch wenn keine flexiblen Boxen mehr da sind oder keine weitere
-// Reduktion mehr erreicht wird.
-function proportionalSizes(counts, available, minSize) {
-    const total = counts.reduce(function(a, b) { return a + Math.max(1, b); }, 0);
-    let sizes = counts.map(function(c) {
-        return Math.max(1, c) / total * available;
-    });
-    sizes = sizes.map(function(s) { return Math.max(minSize, s); });
+const GAP = 160;
+const CELL_GAP = 50;
+const NETWORK_TYPES = new Set(['switch', 'router', 'firewall', 'wireless']);
 
-    // Falls Min-Clamp das Budget gesprengt hat: schrumpfe iterativ nur die
-    // Boxen, die noch ueber minSize liegen. Min-geclampte bleiben fix.
-    let sum = sizes.reduce(function(a, b) { return a + b; }, 0);
-    let guard = 0;
-    while (sum > available && guard < 20) {
-        guard++;
-        const flexIdx = [];
-        let flexSum = 0;
-        sizes.forEach(function(s, i) {
-            if (s > minSize + 0.0001) {
-                flexIdx.push(i);
-                flexSum += s;
-            }
-        });
-        if (flexIdx.length === 0) break;   // alles am Floor — nicht weiter shrinkbar
-        const overflow = sum - available;
-        // Verteile den Overflow proportional auf die flexiblen Boxen, ohne
-        // dabei einer den Floor zu unterschreiten.
-        flexIdx.forEach(function(i) {
-            const share = (sizes[i] / flexSum) * overflow;
-            sizes[i] = Math.max(minSize, sizes[i] - share);
-        });
-        const newSum = sizes.reduce(function(a, b) { return a + b; }, 0);
-        if (newSum >= sum - 0.5) break;   // keine Konvergenz mehr
-        sum = newSum;
+// Attachments with one clear host group travel with their switch. A shared
+// neighbour that spans groups stays unassigned.
+export function assignAttachmentGroups(nodes, edges, groupNames) {
+    const byId = new Map(nodes.map(n => [String(n.id), n]));
+    const neighbours = new Map();
+    const connectedGroups = new Map();
+    const groupOrder = new Map(groupNames.map((name, i) => [name, i]));
+    for (const node of nodes) {
+        delete node._connectedGroups;
+        delete node._sharedAfter;
     }
-    return sizes;
+    function collect(id, other, physical) {
+        const attachment = byId.get(id);
+        const host = byId.get(other);
+        if (!attachment || !host || !groupOrder.has(host._primaryGroup)) return;
+        if (attachment._isGhost || attachment._isEndpointBundle) {
+            if (!neighbours.has(attachment)) neighbours.set(attachment, new Set());
+            neighbours.get(attachment).add(host._primaryGroup);
+        } else if (physical && !attachment._isAggregate && !attachment._isInternet
+                && !NETWORK_TYPES.has(attachment.type) && NETWORK_TYPES.has(host.type)) {
+            if (!connectedGroups.has(attachment)) connectedGroups.set(attachment, new Set());
+            connectedGroups.get(attachment).add(host._primaryGroup);
+        }
+    }
+    for (const edge of edges) {
+        const source = String(edge.source !== undefined ? edge.source : edge.from);
+        const target = String(edge.target !== undefined ? edge.target : edge.to);
+        const physical = !edge.stale && Array.isArray(edge.src)
+            && edge.src.some(src => src === 'lldp' || src === 'cdp' || src === 'tag');
+        collect(source, target, physical);
+        collect(target, source, physical);
+    }
+    for (const [attachment, groups] of neighbours) {
+        if (groups.size === 1) attachment._primaryGroup = groups.values().next().value;
+    }
+    for (const [endpoint, groups] of connectedGroups) {
+        if (groups.size < 2) continue;
+        const ordered = [...groups].sort((a, b) => groupOrder.get(a) - groupOrder.get(b));
+        const first = groupOrder.get(ordered[0]);
+        const last = groupOrder.get(ordered[ordered.length - 1]);
+        endpoint._connectedGroups = ordered;
+        endpoint._sharedAfter = groupNames[Math.floor((first + last) / 2)];
+    }
 }
 
-// Resolved den effektiven Modus aus 'auto' nach Group-Anzahl.
-function resolveMode(mode, numGroups) {
-    if (mode === 'columns' || mode === 'rows' || mode === 'off') return mode;
-    // auto:
-    if (numGroups <= 3) return 'columns';
-    return 'rows';
-}
-
-// Fallback when the cluster boxes cannot be computed (canvas too small or
-// not sized yet at call time): run ONE normal cose layout over the whole
-// graph instead of merely fitting. A bare fit() was the old behaviour — over
-// nodes the empty cluster-preset had left unpositioned it framed nothing,
-// and the map stayed blank while the KPI row happily counted the hosts.
-function fallbackWholeLayout(cy, onComplete) {
-    const movable = cy.nodes('[!isGroup]').not(':locked');
-    if (movable.length === 0) {
-        cy.fit(cy.nodes(), 40);
-        if (onComplete) onComplete();
-        return;
-    }
-    const lay = movable.layout({
-        name: 'cose', animate: false, randomize: true, fit: false,
-        padding: 30, nodeRepulsion: 6000, idealEdgeLength: 80,
-    });
-    lay.one('layoutstop', function() {
-        cy.fit(cy.nodes(), 40);
-        if (onComplete) onComplete();
-    });
-    lay.run();
-}
-
-// Layout-Config pro Cluster. animate=false ist viel schneller.
-// innerLayoutId: 'cose' (default) | 'grid' | 'breadthfirst' | 'concentric' | 'circle'
-// 'auto' / 'hierarchy' / unbekannt fallen auf cose zurueck (cose ist immer die
-// sicherste Per-Cluster-Strategie).
-function buildClusterLayoutConfig(boundingBox, nodeCount, innerLayoutId) {
-    const id = innerLayoutId || 'cose';
-    if (id === 'grid') {
-        return {
-            name: 'grid',
-            animate: false,
-            fit: false,
-            padding: 20,
-            boundingBox: boundingBox,
-            avoidOverlap: true,
-            condense: true,
-        };
-    }
-    if (id === 'breadthfirst') {
-        return {
-            name: 'breadthfirst',
-            animate: false,
-            fit: false,
-            padding: 20,
-            boundingBox: boundingBox,
-            directed: false,
-            spacingFactor: 1.0,
-        };
-    }
-    if (id === 'concentric') {
-        return {
-            name: 'concentric',
-            animate: false,
-            fit: false,
-            padding: 20,
-            boundingBox: boundingBox,
-            minNodeSpacing: 30,
-            avoidOverlap: true,
-        };
-    }
-    if (id === 'circle') {
-        return {
-            name: 'circle',
-            animate: false,
-            fit: false,
-            padding: 20,
-            boundingBox: boundingBox,
-            avoidOverlap: true,
-        };
-    }
-    // cose (default + Fallback fuer 'auto' / 'hierarchy' / Unbekannte).
-    // Deliberately WITHOUT boundingBox: the bundled cytoscape build
-    // mishandles cose+boundingBox and writes y=null on every node — the map
-    // goes blank while the KPI row keeps counting hosts (reproduced
-    // deterministically with a 4-node group). The layout runs unbounded and
-    // fitNodesIntoBox() afterwards scales the result into the cluster box.
-    return {
-        name: 'cose',
-        animate: false,
-        randomize: true,
-        padding: 20,
-        nodeRepulsion: 6000,
-        idealEdgeLength: 80,
-        gravity: 0.8,
-        fit: false,
-        componentSpacing: 30,
-        numIter: nodeCount < 6 ? 500 : 1000,
+function buildClusterLayoutConfig(bounds, count, id) {
+    const discrete = {
+        grid: {avoidOverlap: true},
+        breadthfirst: {directed: false, spacingFactor: 1.3, avoidOverlap: true},
+        concentric: {minNodeSpacing: CELL_GAP, avoidOverlap: true},
+        circle: {avoidOverlap: true}
     };
+    const common = {animate: false, fit: false, nodeDimensionsIncludeLabels: true};
+    if (Object.prototype.hasOwnProperty.call(discrete, id)) {
+        return {...common, name: id, boundingBox: bounds, ...discrete[id]};
+    }
+    // The bundled CoSE can produce invalid coordinates with a bounding box.
+    return {...common, name: 'cose', randomize: true, nodeRepulsion: 6000,
+        idealEdgeLength: 100, gravity: 0.8, componentSpacing: CELL_GAP,
+        numIter: count < 6 ? 500 : 1000};
 }
 
-// Move a laid-out node subset into its cluster box: first grid-place any
-// node without finite coordinates (a layout may fail partially — null/NaN
-// positions render nowhere), then scale + translate the subgraph so it fits
-// the box. Scale only shrinks (cap 1): blowing a compact 2-node result up to
-// box size would spread them absurdly far apart; hulls adapt either way.
-function fitNodesIntoBox(nodes, bb) {
-    const cols = Math.max(1, Math.ceil(Math.sqrt(nodes.length)));
-    const rows = Math.max(1, Math.ceil(nodes.length / cols));
-    nodes.forEach(function(n, i) {
-        const p = n.position();
-        if (Number.isFinite(p.x) && Number.isFinite(p.y)) return;
-        n.position({
-            x: bb.x1 + ((i % cols) + 0.5) * (bb.w / cols),
-            y: bb.y1 + (Math.floor(i / cols) + 0.5) * (bb.h / rows),
-        });
-    });
+const BOUNDS_OPTIONS = {includeLabels: true, includeOverlays: false, includeEdges: false};
 
-    const cur = nodes.boundingBox();
-    const sx = cur.w > 1 ? bb.w / cur.w : 1;
-    const sy = cur.h > 1 ? bb.h / cur.h : 1;
-    const s  = Math.min(sx, sy, 1);
-    const cx = cur.x1 + cur.w / 2;
-    const cy2 = cur.y1 + cur.h / 2;
-    nodes.positions(function(n) {
-        const p = n.position();
-        return {
-            x: bb.x1 + bb.w / 2 + (p.x - cx) * s,
-            y: bb.y1 + bb.h / 2 + (p.y - cy2) * s,
-        };
+function groupBounds(nodes) {
+    let width = 0;
+    let height = 0;
+    nodes.forEach(function(node) {
+        const bounds = node.boundingBox(BOUNDS_OPTIONS);
+        width = Math.max(width, bounds.w);
+        height = Math.max(height, bounds.h);
     });
+    const columns = Math.ceil(Math.sqrt(nodes.length));
+    return {x1: 0, y1: 0, w: columns * (width + CELL_GAP),
+        h: Math.ceil(nodes.length / columns) * (height + CELL_GAP)};
 }
 
 export function runGroupClusterLayout(cy, groupNames, mode, onComplete, innerLayoutId) {
     if (!cy || cy.destroyed()) return;
-    if (!groupNames || groupNames.length < 2) {
+    if (groupNames.length < 2 || mode === 'off' || mode === 'colors') {
         if (onComplete) onComplete();
         return;
     }
-    const effective = resolveMode(mode || 'auto', groupNames.length);
-    if (effective === 'off') {
-        if (onComplete) onComplete();
-        return;
+    const columns = mode === 'columns' || (mode === 'auto' && groupNames.length <= 3);
+    const members = new Map(groupNames.map(name => [name, {nodes: [], edges: []}]));
+    const shared = new Map();
+    const unassigned = {nodes: [], edges: []};
+    const assigned = new Map();
+
+    cy.nodes('[!isGroup]').forEach(function(node) {
+        if (node.data('_isAggregate') || node.locked()) return;
+        const anchor = node.data('_sharedAfter');
+        let group = members.get(node.data('_primaryGroup')) || unassigned;
+        if (anchor) {
+            if (!shared.has(anchor)) shared.set(anchor, {nodes: [], edges: []});
+            group = shared.get(anchor);
+        }
+        group.nodes.push(node);
+        assigned.set(node.id(), group);
+    });
+
+    cy.edges().forEach(function(edge) {
+        const group = assigned.get(edge.source().id());
+        if (group && group === assigned.get(edge.target().id())) group.edges.push(edge);
+    });
+
+    const groups = [];
+    for (const [name, group] of members) {
+        if (group.nodes.length) groups.push(group);
+        if (shared.has(name)) groups.push(shared.get(name));
     }
-
-    const canvasW = cy.width();
-    const canvasH = cy.height();
-    const count = groupNames.length;
-
-    // Pro Gruppe Knoten sammeln (Internet/Aggregate ausgenommen) — VOR der
-    // Box-Berechnung, weil die Spalten-Breiten proportional zur Knoten-Anzahl
-    // alloziert werden.
-    const nodesByGroup = {};
-    cy.nodes('[!isGroup]').forEach(function(n) {
-        const d = n.data();
-        if (d._isInternet || d._isAggregate) return;
-        const g = d._primaryGroup;
-        if (!g) return;
-        if (!nodesByGroup[g]) nodesByGroup[g] = cy.collection();
-        nodesByGroup[g] = nodesByGroup[g].union(n);
-    });
-    const counts = groupNames.map(function(g) {
-        return (nodesByGroup[g] && nodesByGroup[g].length) || 0;
-    });
-
-    // Bounding-Boxes berechnen je nach Mode.
-    // Fuer kreisfoermige Inner-Layouts (concentric / circle) brauchen alle
-    // Gruppen quadratische Boxen damit der Kreis nicht zur Linie zusammenfaellt.
-    // Bei diesen Layouts ueberschreibt equal-split die proportionale Verteilung.
-    const isCircular = innerLayoutId === 'concentric' || innerLayoutId === 'circle';
-    const equalSplit = function(avail, n) {
-        return Array(n).fill(avail / n);
+    if (unassigned.nodes.length) groups.push(unassigned);
+    const done = function() {
+        if (cy.destroyed()) return;
+        const pinned = cy.nodes(':locked');
+        const pinnedBounds = pinned.length ? pinned.boundingBox(BOUNDS_OPTIONS) : null;
+        // Keep the packed groups clear of any nodes fixed by the operator.
+        let cursor = pinnedBounds ? (columns ? pinnedBounds.x2 : pinnedBounds.y2) + GAP : 0;
+        cy.batch(function() {
+            for (const group of groups) {
+                const nodes = group.collection;
+                const bounds = nodes.boundingBox(BOUNDS_OPTIONS);
+                const x = (columns ? cursor : 0) - bounds.x1;
+                const y = (columns ? 0 : cursor) - bounds.y1;
+                // Cytoscape positions() resolves by element index. Snapshot
+                // the previous coordinates before translating the group.
+                const positions = new Map(nodes.map(n => [n.id(), n.position()]));
+                nodes.positions(n => {
+                    const p = positions.get(n.id());
+                    return {x: p.x + x, y: p.y + y};
+                });
+                cursor += (columns ? bounds.w : bounds.h) + GAP;
+            }
+        });
+        fitTopology(cy, cy.nodes(), 45);
+        if (onComplete) onComplete();
     };
 
-    const boxes = {};
-    if (effective === 'columns') {
-        const totalGap = COLUMN_PADDING * (count + 1);
-        const availW = canvasW - totalGap;
-        const colH = canvasH - TOP_RESERVE - BOTTOM_PADDING;
-        if (availW < MIN_COLUMN_W * count || colH < 100) {
-            fallbackWholeLayout(cy, onComplete);
-            return;
-        }
-        const colWidths = isCircular
-            ? equalSplit(availW, count)
-            : proportionalSizes(counts, availW, MIN_COLUMN_W);
-        let xCursor = COLUMN_PADDING;
-        groupNames.forEach(function(g, idx) {
-            boxes[g] = {
-                x1: xCursor,
-                y1: TOP_RESERVE,
-                w:  colWidths[idx],
-                h:  colH,
-            };
-            xCursor += colWidths[idx] + COLUMN_PADDING;
-        });
-    } else {  // rows
-        const totalGap = ROW_PADDING * (count - 1);
-        const availH = canvasH - TOP_RESERVE - BOTTOM_PADDING - totalGap;
-        const rowW = canvasW - 2 * ROW_PADDING;
-        if (rowW < 100 || availH < MIN_ROW_H * count) {
-            fallbackWholeLayout(cy, onComplete);
-            return;
-        }
-        const rowHeights = isCircular
-            ? equalSplit(availH, count)
-            : proportionalSizes(counts, availH, MIN_ROW_H);
-        let yCursor = TOP_RESERVE;
-        groupNames.forEach(function(g, idx) {
-            boxes[g] = {
-                x1: ROW_PADDING,
-                y1: yCursor,
-                w:  rowW,
-                h:  rowHeights[idx],
-            };
-            yCursor += rowHeights[idx] + ROW_PADDING;
-        });
-    }
-
-    // Internet-Knoten zentriert oben
-    const internetNodes = cy.nodes('[!isGroup]').filter(function(n) {
-        return n.data('_isInternet');
-    });
-    if (internetNodes.length > 0) {
-        internetNodes.position({
-            x: canvasW / 2,
-            y: TOP_RESERVE / 2,
-        });
-    }
-
-    // Pro Gruppe Layout starten und auf alle layoutstop-Events warten.
-    //
-    // WICHTIG: pending wird in einem ERSTEN Pass berechnet, bevor irgendein
-    // lay.run() läuft. Discrete Layouts (grid/circle/concentric/breadthfirst)
-    // feuern layoutstop synchron innerhalb von lay.run() — wenn pending erst
-    // in der Schleife inkrementiert würde, sähe checkDone() nach der ersten
-    // Iteration completed=1 >= pending=1 und würde onComplete/cy.fit
-    // mehrfach feuern (einmal pro Iteration), während andere Gruppen noch
-    // in Pre-Layout-Positionen sind. Cose ist async und maskierte das früher.
-    const groupsToLayout = groupNames.filter(function(g) {
-        const nodes = nodesByGroup[g];
-        return nodes && nodes.length > 0;
-    });
-    const pending = groupsToLayout.length;
-    let completed = 0;
-    function checkDone() {
-        if (completed >= pending) {
-            cy.fit(cy.nodes(), 30);
-            if (onComplete) onComplete();
-        }
-    }
-
-    if (pending === 0) {
-        if (onComplete) onComplete();
+    if (!groups.length) {
+        done();
         return;
     }
 
-    groupsToLayout.forEach(function(g) {
-        // Pinned (locked) Nodes vom Per-Cluster-Layout ausschliessen — cose
-        // honoriert den locked-State zwar selbst, aber explizit zu filtern
-        // ist robuster (manche Layouts wie 'preset'/'grid' tun's nicht
-        // zuverlaessig). Wenn alle Nodes der Gruppe pinned sind, wird die
-        // Gruppe komplett uebersprungen — sind ja schon manuell positioniert.
-        const nodes = nodesByGroup[g].not(':locked');
-        if (nodes.length === 0) {
-            // Nichts zu layouten, aber checkDone trotzdem trigger damit
-            // die pending/completed-Buchhaltung sauber bleibt.
-            completed++;
-            checkDone();
-            return;
-        }
-        const bb = Object.assign({}, boxes[g]);
-        // Top-Reserve in der BB für Group-Label
-        bb.y1 += LABEL_OFFSET;
-        bb.h  -= LABEL_OFFSET;
-        const lay = nodes.layout(buildClusterLayoutConfig(bb, nodes.length, innerLayoutId));
-        lay.one('layoutstop', function() {
-            // Into the box + sanitize: cose ran unbounded (see above), the
-            // discrete layouts already sit in the box (transform ≈ identity)
-            // but get the same non-finite-coordinate safety net.
-            fitNodesIntoBox(nodes, bb);
-            completed++;
-            checkDone();
+    let running = groups.length;
+    for (const group of groups) {
+        const nodes = group.collection = cy.collection(group.nodes);
+        const bounds = groupBounds(nodes);
+        const elements = nodes.union(cy.collection(group.edges));
+        const nodeData = nodes.map(node => node.data());
+        const options = innerLayoutId === 'hierarchy' || usesTieredLayout(innerLayoutId, nodeData) ? {
+            ...buildLayoutConfig(innerLayoutId, nodeData,
+                group.edges.map(edge => edge.data()), true),
+            animate: false, fit: false, stop: undefined
+        } : buildClusterLayoutConfig(bounds, nodes.length, innerLayoutId);
+        const layout = elements.layout(options);
+        layout.one('layoutstop', function() {
+            nodes.forEach(function(node, i) {
+                const p = node.position();
+                if (Number.isFinite(p.x) && Number.isFinite(p.y)) return;
+                const step = Math.ceil(Math.sqrt(nodes.length));
+                node.position({x: (i % step) * bounds.w / step,
+                    y: Math.floor(i / step) * bounds.h / step});
+            });
+            separateLayoutNodes(nodes);
+            if (--running === 0) done();
         });
-        lay.run();
-    });
+        layout.run();
+    }
 }

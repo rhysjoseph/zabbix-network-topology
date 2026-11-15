@@ -9,12 +9,13 @@
 //   auto         — Heuristik (Preset bei gespeicherten Positionen, sonst
 //                  concentric bei sparse Graphen, sonst cose)
 //   cose         — Force-Directed: gut für dichte, vermaschte Topologien
-//   concentric   — Konzentrische Ringe nach Knoten-Grad: Hub im Zentrum
+//   concentric   — Ringe nach nt:tier, sonst Knoten-Grad
 //   grid         — Gleichmäßiges Raster: gut für Übersichten ohne Edges
 //   breadthfirst — Hierarchischer Baum von oben nach unten
 
 import { loadPositions } from './storage.js';
 import { t } from './i18n.js';
+import { finishSpacedLayout } from './layout-spacing.js';
 
 // Optionen für das Toolbar-Dropdown. Die Reihenfolge bestimmt die Anzeige.
 export const LAYOUT_OPTIONS = [
@@ -39,6 +40,39 @@ const TIER_ORDER = {
     ups: 7, camera: 7, printer: 7
 };
 const TIER_DEFAULT = 4;   // unbekannte Device-Types landen bei "Server"
+const ROLE_TIER = new Map([['spine', 2], ['leaf', 3], ['access', 4], ['endpoint', 7]]);
+
+function hasLayoutTiers(nodes) {
+    return nodes.some(n => ROLE_TIER.has(n.layout_tier));
+}
+
+export function usesTieredLayout(layoutId, nodes) {
+    return (layoutId === 'hierarchy' || layoutId === 'concentric') && hasLayoutTiers(nodes);
+}
+
+export function shouldClusterGroups(layoutId, nodes, groupCount, mode, saved = false) {
+    if (groupCount < 2 || mode === 'off' || mode === 'colors') return false;
+    // Explicit rows/columns still let an operator choose host group boxes.
+    if (mode !== 'auto') return true;
+    return !saved && !usesTieredLayout(layoutId, nodes);
+}
+
+function layoutTier(node, tagged) {
+    if (String(node.id).startsWith('internet_')) return -1;
+    if (!tagged) return TIER_ORDER[node.type] !== undefined ? TIER_ORDER[node.type] : TIER_DEFAULT;
+    if (ROLE_TIER.has(node.layout_tier)) return ROLE_TIER.get(node.layout_tier);
+    // Untagged infrastructure stays visible below the declared switch tiers.
+    return node.type === 'firewall' ? 0 : node.type === 'router' ? 1 :
+        node.type === 'switch' || node.type === 'wireless' ? 5 :
+        node._isGhost || node._isEndpointBundle || node.type === 'client' ? 7 : 6;
+}
+
+function concentricTier(node) {
+    const tier = layoutTier(node.data(), true);
+    // Keep the innermost level for spines/cores. In Hierarchy, the Internet
+    // and untagged routers/firewalls have rows above them.
+    return -(tier < ROLE_TIER.get('spine') ? ROLE_TIER.get('endpoint') : tier);
+}
 
 // Platziert Tiers von oben nach unten und BRICHT breite Tiers in mehrere
 // Unterzeilen um, damit das Gesamtbild grob quadratisch bleibt.
@@ -55,12 +89,13 @@ const TIER_DEFAULT = 4;   // unbekannte Device-Types landen bei "Server"
 // das waere, wird mehrzeilig gestapelt (Unterzeilen im nodeGap-Raster), die
 // Tier-Trennung (tierGap) kommt zwischen zwei Tiers obendrauf. Kleine Tiers
 // (unter maxPerRow) bleiben unveraendert einzeilig.
-function placeTiersWrapped(tiersInOrder, nodeGap, tierGap, totalNodes) {
+function placeTiersWrapped(tiersInOrder, nodeGap, tierGap, totalNodes, orderRow) {
     const maxPerRow = Math.max(12, Math.ceil(Math.sqrt(totalNodes || 1)));
     const positions = {};
     let y = 0;
     tiersInOrder.forEach(function(reihe) {
         if (!reihe || !reihe.length) return;
+        if (orderRow) orderRow(reihe, positions);
         const rows = Math.ceil(reihe.length / maxPerRow);
         const perRow = Math.ceil(reihe.length / rows);
         for (let r = 0; r < rows; r++) {
@@ -87,25 +122,21 @@ function placeTiersWrapped(tiersInOrder, nodeGap, tierGap, totalNodes) {
 //   nodeGap     — horizontaler Abstand zwischen Nodes derselben Tier
 //
 // Returns: { 'nodeId': {x, y}, ... } — Map für Cytoscape preset-Layout.
-function buildHierarchyPositions(nodes) {
+function buildHierarchyPositions(nodes, edges) {
     const tierGap = 180;
-    const nodeGap = 150;
+    const tagged = hasLayoutTiers(nodes);
+    const nodeGap = tagged ? 190 : 150;
 
     // Nodes nach Tier gruppieren
     const byTier = {};
     nodes.forEach(function(n) {
-        let tier;
-        if (String(n.id).indexOf('internet_') === 0) {
-            tier = -1;
-        } else {
-            tier = TIER_ORDER[n.type] !== undefined ? TIER_ORDER[n.type] : TIER_DEFAULT;
-        }
+        const tier = layoutTier(n, tagged);
         if (!byTier[tier]) byTier[tier] = [];
         byTier[tier].push(n);
     });
 
     // Sortierung pro Tier: nach Severity desc (Probleme oben), dann Label asc
-    Object.keys(byTier).forEach(function(t) {
+    if (!tagged) Object.keys(byTier).forEach(function(t) {
         byTier[t].sort(function(a, b) {
             return (b.severity || 0) - (a.severity || 0)
                 || (a.label || '').localeCompare(b.label || '');
@@ -116,7 +147,37 @@ function buildHierarchyPositions(nodes) {
     // Breite Tiers umbrechen, sonst schrumpft fit() tausende Knoten auf
     // Sub-Pixel — siehe placeTiersWrapped().
     const ordered = tiers.map(function(tier) { return byTier[tier]; });
-    return placeTiersWrapped(ordered, nodeGap, tierGap, nodes.length);
+    return placeTiersWrapped(ordered, nodeGap, tierGap, nodes.length,
+        tagged ? orderByUplink(edges) : null);
+}
+
+// Lay out each row near its already placed uplinks. Multiple cables to
+// the same switch count once, and alarms cannot change the order.
+function orderByUplink(edges) {
+    const neighbours = new Map();
+    for (const e of edges || []) {
+        const a = String(e.source !== undefined ? e.source : e.from);
+        const b = String(e.target !== undefined ? e.target : e.to);
+        if (a === b) continue;
+        if (!neighbours.has(a)) neighbours.set(a, new Set());
+        if (!neighbours.has(b)) neighbours.set(b, new Set());
+        neighbours.get(a).add(b);
+        neighbours.get(b).add(a);
+    }
+    return function(row, placed) {
+        const score = new Map();
+        for (const node of row) {
+            const candidates = [...(neighbours.get(String(node.id)) || [])].sort()
+                .map(id => placed[id]).filter(Boolean);
+            const deepest = candidates.reduce((y, p) => Math.max(y, p.y), -Infinity);
+            const upstream = candidates.filter(p => p.y === deepest);
+            score.set(node, upstream.length
+                ? upstream.reduce((sum, p) => sum + p.x, 0) / upstream.length : Infinity);
+        }
+        row.sort((a, b) => (score.get(a) - score.get(b)) ||
+            (a.label || '').localeCompare(b.label || '', 'en') ||
+            String(a.id).localeCompare(String(b.id), 'en'));
+    };
 }
 
 /**
@@ -321,6 +382,14 @@ function buildFallbackPositions(nodes, edges, saved) {
     return pos;
 }
 
+export function positionsLayout(nodes, edges, saved, fit = true) {
+    const fallback = buildFallbackPositions(nodes, edges, saved);
+    return {
+        name: 'preset', fit, padding: 30,
+        positions: node => saved[node.id()] || fallback[node.id()]
+    };
+}
+
 // Baut das Layout-Config für Cytoscape. `layoutId` ist eine der LAYOUT_OPTIONS-
 // IDs ('auto' = Heuristik mit Preset-Versuch). nodes/edges werden nur für die
 // Heuristik bei 'auto' und für 'hierarchy' (Positions-Berechnung) gebraucht;
@@ -339,7 +408,9 @@ export function letzterLayoutGrund() {
 
 export function buildLayoutConfig(layoutId, nodes, edges, forceFresh) {
     _letzterGrund = '';
-    if (layoutId === 'auto' && !forceFresh) {
+    // Auto's fallback to Concentric still uses the degree-based layout.
+    const tieredRings = layoutId === 'concentric' && hasLayoutTiers(nodes);
+    if ((layoutId === 'auto' || layoutId === 'cose') && !forceFresh) {
         // Preset-Versuch: 80% der Nodes haben gespeicherte, plausible Positionen
         const sp = loadPositions();
         // Geister zaehlen bei der Abdeckung NICHT mit. Sie haben nie eine
@@ -347,7 +418,7 @@ export function buildLayoutConfig(layoutId, nodes, edges, forceFresh) {
         // sicherer fiel die eigene Anordnung unter die 80 % und wurde
         // kommentarlos durch ein frisches Force-Layout ersetzt.
         const ids = nodes.map(function(n) { return String(n.id); })
-            .filter(function(id) { return id.indexOf('ghost_') !== 0; });
+            .filter(function(id) { return !/^(ghost_|bundle_|guests_|internet_)/.test(id); });
         const hits = ids.filter(function(id) { return !!sp[id]; }).length;
         const coverage = ids.length > 0 ? hits / ids.length : 0;
         // Schutz gegen vergiftete localStorage-Snapshots (alle bei 0,0)
@@ -369,45 +440,42 @@ export function buildLayoutConfig(layoutId, nodes, edges, forceFresh) {
         // dann rechnet ein frischer Lauf das bessere Bild. Die Schwelle ist
         // absichtlich hoch: wer seine Anordnung von Hand gelegt hat, soll sie
         // nicht wegen ein paar Geistern verlieren.
-        const geister = nodes.length - ids.length;
+        const geister = nodes.filter(n => String(n.id).startsWith('ghost_')).length;
         const geisterUeberwiegen = ids.length > 0 && geister > ids.length * 2;
 
-        if (coverage >= 0.8 && hasNonZero && !geisterUeberwiegen) {
-            const fallback = buildFallbackPositions(nodes, edges, sp);
-            return {
-                name: 'preset',
-                positions: function(node) { return sp[node.id()] || fallback[node.id()]; },
-                padding: 30
-            };
+        if (coverage >= 0.8 && hasNonZero && (layoutId === 'cose' || !geisterUeberwiegen)) {
+            return { ...positionsLayout(nodes, edges, sp), saved: true };
         }
-        // Der Aufrufer soll es SAGEN koennen: eine Karte, die sich anders
-        // anordnet als beim letzten Mal, ohne dass jemand etwas geklickt hat,
-        // wird sonst fuer einen Fehler gehalten.
-        if (coverage >= 0.8 && hasNonZero && geisterUeberwiegen) {
-            _letzterGrund = 'geister';
-        }
+        if (layoutId === 'auto') {
+            // Der Aufrufer soll es SAGEN koennen: eine Karte, die sich anders
+            // anordnet als beim letzten Mal, ohne dass jemand etwas geklickt hat,
+            // wird sonst fuer einen Fehler gehalten.
+            if (coverage >= 0.8 && hasNonZero && geisterUeberwiegen) {
+                _letzterGrund = 'geister';
+            }
 
-        // Bei sparse Graphen (edges/nodes < 0.3) ist concentric besser als
-        // cose, weil cose isolierte Nodes in einer Spalte stapelt.
-        // Beide Seiten OHNE Geister zaehlen. ids ist oben schon gefiltert;
-        // die Kanten mitzufiltern gehoert dazu, sonst steigt der Quotient mit
-        // jedem Geist und die Wahl zwischen concentric und cose kippt an der
-        // Schwelle aus einem Grund, der mit dem Graphen nichts zu tun hat.
-        const edgeCount = (edges || []).filter(function(e) {
-            const a = String(e.source !== undefined ? e.source : e.from);
-            const b = String(e.target !== undefined ? e.target : e.to);
-            return a.indexOf('ghost_') !== 0 && b.indexOf('ghost_') !== 0;
-        }).length;
-        const connectivity = ids.length > 0 ? edgeCount / ids.length : 0;
-        // Ab ein paar hundert Knoten ist cose ein Haarball, egal wie vermascht
-        // der Graph ist: die Konnektivitaet des Lasttests lag bei 1,44, also
-        // klar ueber jeder Schwelle fuer "dicht" — und 200 Knoten in 215
-        // Verbindungen sind trotzdem fast genau ein BAUM. Force-Directed
-        // verteilt einen Baum zu einer Wolke. Zwischen "lesbar" und perfMode
-        // (ab 1000 Knoten) klaffte hier eine Luecke.
-        if (ids.length > 150)                      layoutId = 'hops';
-        else if (connectivity < 0.3 && ids.length > 5) layoutId = 'concentric';
-        else                                       layoutId = 'cose';
+            // Bei sparse Graphen (edges/nodes < 0.3) ist concentric besser als
+            // cose, weil cose isolierte Nodes in einer Spalte stapelt.
+            // Beide Seiten OHNE Geister zaehlen. ids ist oben schon gefiltert;
+            // die Kanten mitzufiltern gehoert dazu, sonst steigt der Quotient mit
+            // jedem Geist und die Wahl zwischen concentric und cose kippt an der
+            // Schwelle aus einem Grund, der mit dem Graphen nichts zu tun hat.
+            const edgeCount = (edges || []).filter(function(e) {
+                const a = String(e.source !== undefined ? e.source : e.from);
+                const b = String(e.target !== undefined ? e.target : e.to);
+                return a.indexOf('ghost_') !== 0 && b.indexOf('ghost_') !== 0;
+            }).length;
+            const connectivity = ids.length > 0 ? edgeCount / ids.length : 0;
+            // Ab ein paar hundert Knoten ist cose ein Haarball, egal wie vermascht
+            // der Graph ist: die Konnektivitaet des Lasttests lag bei 1,44, also
+            // klar ueber jeder Schwelle fuer "dicht" — und 200 Knoten in 215
+            // Verbindungen sind trotzdem fast genau ein BAUM. Force-Directed
+            // verteilt einen Baum zu einer Wolke. Zwischen "lesbar" und perfMode
+            // (ab 1000 Knoten) klaffte hier eine Luecke.
+            if (ids.length > 150)                      layoutId = 'hops';
+            else if (connectivity < 0.3 && ids.length > 5) layoutId = 'concentric';
+            else                                       layoutId = 'cose';
+        }
     } else if (layoutId === 'auto' && forceFresh) {
         // Bei "Layout neu rechnen" mit auto: cose — ausser die Karte ist zu
         // gross dafuer. Diese Schwelle stand zuerst nur im anderen Zweig, und
@@ -429,14 +497,15 @@ export function buildLayoutConfig(layoutId, nodes, edges, forceFresh) {
                 // den Knotenkreis von 44 px, waehrend ein Name wie "sw-edge-14.rack3" dreimal
                 // so breit ist — die Kreise standen frei, die Namen lagen
                 // uebereinander.
-                nodeDimensionsIncludeLabels: true
+                nodeDimensionsIncludeLabels: true,
+                stop: finishSpacedLayout
             };
         case 'concentric':
             return {
                 name: 'concentric', animate: true, animationDuration: 500,
                 padding: 50, fit: true, minNodeSpacing: 60,
                 nodeDimensionsIncludeLabels: true,
-                concentric: function(node) { return node.degree(); },
+                concentric: tieredRings ? concentricTier : function(node) { return node.degree(); },
                 levelWidth: function() { return 1; }
             };
         case 'grid':
@@ -460,13 +529,14 @@ export function buildLayoutConfig(layoutId, nodes, edges, forceFresh) {
             return {
                 name: 'preset',
                 positions: (function() {
-                    const pos = buildHierarchyPositions(nodes);
+                    const pos = buildHierarchyPositions(nodes, edges);
                     return function(node) { return pos[node.id()] || undefined; };
                 })(),
                 padding: 50,
                 fit: true,
                 animate: true,
-                animationDuration: 500
+                animationDuration: 500,
+                stop: finishSpacedLayout
             };
         case 'hops':
             // Schichten nach Hop-Abstand zur Uplink-Referenz statt nach
@@ -492,7 +562,8 @@ export function buildLayoutConfig(layoutId, nodes, edges, forceFresh) {
                 // den Knotenkreis von 44 px, waehrend ein Name wie "sw-edge-14.rack3" dreimal
                 // so breit ist — die Kreise standen frei, die Namen lagen
                 // uebereinander.
-                nodeDimensionsIncludeLabels: true
+                nodeDimensionsIncludeLabels: true,
+                stop: finishSpacedLayout
             };
     }
 }

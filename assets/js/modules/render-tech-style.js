@@ -343,6 +343,10 @@ export function buildCytoscapeStyle(dark, knotenzahl, sizeFactor) {
         { selector: 'node[type = "router"]', style: {
             'border-width': 4, 'border-color': '#7c3aed', 'border-opacity': 0.85,
         }},
+        { selector: 'node.nt-group-colour', style: {
+            'border-width': px(5), 'border-color': 'data(groupColour)', 'border-opacity': 0.9
+        }},
+        { selector: 'node.nt-shared-endpoint', style: {'border-style': 'dashed'} },
         { selector: 'node[!isGroup]:selected', style: {
             'underlay-color': '#6366f1', 'underlay-padding': 6,
             'underlay-opacity': 0.25, 'underlay-shape': 'ellipse',

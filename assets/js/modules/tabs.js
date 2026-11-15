@@ -33,6 +33,7 @@
 import { saveSnapshot, loadSnapshot, clearSnapshot, formatSnapshotAge } from './diff-mode.js';
 import { t } from './i18n.js';
 import { seiteIstDunkel, resetAdaptiveTheme, paintAdaptive } from './utils.js';
+import { toggleToolbarPopover } from './toolbar-popover.js';
 
 // Zabbix links its theme as assets/styles/<theme>.css — dark-theme and
 // hc-dark are the dark ones. No more knowledge of the Zabbix page is needed;
@@ -145,7 +146,8 @@ export function ensureBaseToolbar(wrap) {
     if (!document.getElementById('nt-tab-wrap')) {
         const tw = document.createElement('div');
         tw.id = 'nt-tab-wrap';
-        tw.style.cssText = 'display:flex;gap:2px;margin-right:8px;padding-right:8px;'
+        tw.style.cssText = 'display:flex;flex-wrap:wrap;max-width:100%;box-sizing:border-box;'
+                         + 'gap:2px;margin-right:8px;padding-right:8px;'
                          + 'border-right:1px solid var(--nt-line,#e2e8f0);flex-shrink:0';
         TABS.forEach(function(item) {
             const b = document.createElement('button');
@@ -253,6 +255,7 @@ const _GRAPH_ONLY_SELECTORS = [
     '#nt-layout-wrap',    // Layout-Dropdown
     '#nt-btn-groupview',  // Gruppieren
     '#nt-cluster-wrap',   // Cluster-Mode-Toggle
+    '#nt-btn-follow-layout',
     '#nt-btn-lldp',       // LLDP an/aus
     '#nt-btn-weathermap', // Weathermap-Modus (Auslastungs-%)
     '#nt-btn-scales',     // color-scales editor (super admin)
@@ -296,23 +299,6 @@ export function setGraphToolbarVisible(visible) {
 // Pops verschiebt. Idempotent — schon bewegte Buttons werden nicht erneut
 // angefasst.
 
-function _closeAllMenuPops() {
-    document.querySelectorAll('[data-nt-menu-pop]').forEach(function(p) {
-        p.style.display = 'none';
-    });
-}
-
-// Outside-Click schliesst offene Menus (einmal pro Page-Load installieren).
-function _ensureMenuOutsideHandler() {
-    if (window._ntMenuHandlerDone) return;
-    window._ntMenuHandlerDone = true;
-    document.addEventListener('click', function(e) {
-        const t = e.target;
-        if (t && t.closest && t.closest('[data-nt-menu-pop],[data-nt-menu-trigger]')) return;
-        _closeAllMenuPops();
-    });
-}
-
 // CSS fuer Menu-Items im Pop — flach, einheitliche Hoehe, Hover-Highlight.
 // Wird einmalig per Style-Tag eingehaengt damit wir die Original-btn-alt-
 // Styles ueberschreiben koennen (mit !important wegen Inline-Style-Konflikten).
@@ -321,9 +307,12 @@ function _ensureMenuStyle() {
     const st = document.createElement('style');
     st.id = 'nt-menu-style';
     st.textContent = ''
+        + '[data-nt-menu-pop] { box-sizing:border-box; overflow:auto; overscroll-behavior:contain; }'
+        + '[data-nt-menu-pop] > button { display: block; }'
+        + '[data-nt-menu-pop] > div { display: block !important; }'
         + '[data-nt-menu-pop] > button,'
         + '[data-nt-menu-pop] > div {'
-        + '  display: block !important;'
+        + '  box-sizing: border-box;'
         + '  width: 100% !important;'
         + '  text-align: left !important;'
         + '  margin: 0 0 1px 0 !important;'
@@ -339,6 +328,9 @@ function _ensureMenuStyle() {
         + '  white-space: nowrap !important;'
         + '  position: static !important;'
         + '}'
+        + '[data-nt-menu-pop] > :is(#nt-layout-wrap,#nt-cluster-wrap,#nt-preset-wrap) {'
+        + '  padding: 0 !important;'
+        + '}'
         + '[data-nt-menu-pop] > button:hover,'
         + '[data-nt-menu-pop] > div:hover {'
         + '  background: #f1f5f9 !important;'
@@ -351,7 +343,7 @@ function _ensureMenuStyle() {
         + '  width: 100% !important;'
         + '  text-align: left !important;'
         + '  margin: 0 !important;'
-        + '  padding: 0 !important;'
+        + '  padding: 6px 10px !important;'
         + '  border: none !important;'
         + '  background: transparent !important;'
         + '  color: inherit !important;'
@@ -382,6 +374,16 @@ function _ensureMenuStyle() {
         + '  font-size: 11px !important;'
         + '  border-radius: 3px !important;'
         + '  cursor: pointer !important;'
+        + '}'
+        + '[data-nt-menu-pop] > #nt-preset-wrap > div:first-child {'
+        + '  display: block !important; padding: 0 !important; margin: 0 !important;'
+        + '  border: 0 !important; background: transparent !important;'
+        + '}'
+        + '[data-nt-menu-pop] #nt-preset-dd-btn + div {'
+        + '  position: static !important; min-width: 0 !important; max-width: 100% !important;'
+        + '}'
+        + '[data-nt-menu-pop] > #nt-preset-wrap > button {'
+        + '  margin: 2px 1px !important;'
         + '}'
         + '[data-nt-menu-pop] > div > div > button:hover {'
         + '  background: #e2e8f0 !important;'
@@ -425,7 +427,7 @@ function _mkMenuShell(id, label) {
     btn.className = 'btn-alt btn-small';
     btn.style.margin = '0';
     btn.textContent = label + ' ▾';
-    btn.dataset.ntMenuTrigger = '1';
+    btn.setAttribute('aria-expanded', 'false');
     wrap.appendChild(btn);
     const pop = document.createElement('div');
     pop.id = id + '-pop';
@@ -437,9 +439,7 @@ function _mkMenuShell(id, label) {
     wrap.appendChild(pop);
     btn.addEventListener('click', function(e) {
         e.stopPropagation();
-        const wasOpen = pop.style.display !== 'none' && pop.style.display !== '';
-        _closeAllMenuPops();
-        if (!wasOpen) pop.style.display = 'block';
+        toggleToolbarPopover(btn, pop);
     });
     return wrap;
 }
@@ -457,13 +457,11 @@ function _moveIntoMenu(srcId, menuId) {
     el.style.removeProperty('margin-right');
     el.style.removeProperty('margin-top');
     el.style.removeProperty('margin-bottom');
-    el.style.removeProperty('display');
     el.style.removeProperty('position');
     pop.appendChild(el);
 }
 
 function regroupToolbar() {
-    _ensureMenuOutsideHandler();
     _ensureMenuStyle();
     const bar = document.querySelector('.nt-topbar__actions');
     if (!bar) return;
@@ -489,6 +487,7 @@ function regroupToolbar() {
     _moveIntoMenu('nt-layout-wrap',    'nt-menu-layout');
     _moveIntoMenu('nt-btn-groupview',  'nt-menu-layout');
     _moveIntoMenu('nt-cluster-wrap',   'nt-menu-layout');
+    _moveIntoMenu('nt-btn-follow-layout', 'nt-menu-layout');
 
     _moveIntoMenu('nt-btn-snap',       'nt-menu-tools');
     _moveIntoMenu('nt-btn-snap-clear', 'nt-menu-tools');

@@ -89,6 +89,13 @@ $hosts = [
 
 $r = HostTagParser::parse($hosts);
 
+check('nt:tier normalizes aliases and ignores conflicts', HostTagParser::parse([
+    'spine' => host([tag('nt:tier', ' Core '), tag('nt:tier', 'spine')]),
+    'leaf' => host([tag('nt:tier', 'Distribution')]),
+    'conflict' => host([tag('nt:tier', 'access'), tag('nt:tier', 'leaf'), tag('nt:tier', 'access')]),
+    'unknown' => host([tag('nt:tier', 'unknown')]),
+])['tier'], ['spine' => 'spine', 'leaf' => 'leaf']);
+
 echo "\nGueltige Tags\n";
 check('nt:icon aus der Whitelist wird uebernommen', $r['icon_override']['h1'] ?? null, 'router');
 check('nt:show landet in show_keys',                $r['show_keys']['h1'][0]  ?? null, 'system.cpu.util');

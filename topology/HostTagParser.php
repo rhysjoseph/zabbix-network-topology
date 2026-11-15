@@ -19,6 +19,7 @@ namespace Modules\NetworkTopology\Topology;
  *   nt:uplink=<host>:<port>  an welchem PORT welches Geraets dieser Host haengt
  *   nt:expect=<host>[/<port>]  erwarteter Nachbar — Soll gegen gemessenes Ist
  *   nt:lldp=<name>    unter welchem Namen dieser Host auf dem Draht auftritt
+ *   nt:tier=<role>    core/spine, distribution/leaf, access or endpoint
  *
  * Das ist Verarbeitung von Daten, die ein Mensch frei eintippt — inklusive der
  * Validierung, die verhindert, dass daraus etwas Gefaehrliches wird (nur
@@ -34,7 +35,7 @@ final class HostTagParser {
     /**
      * @param array $hosts  hostid => Host-Datensatz (mit 'tags')
      *
-     * @return array{icon_override: array, show_keys: array, links: array, parent: array, uplink: array, expect: array, lldp: array}
+     * @return array{icon_override: array, show_keys: array, links: array, parent: array, uplink: array, expect: array, lldp: array, tier: array}
      */
     public static function parse(array $hosts): array {
         // ── 2b. TAG-SCAN: nt:icon, nt:show ────────────────────────────────
@@ -49,6 +50,10 @@ final class HostTagParser {
         $host_uplink        = [];   // hid => [ ['host' => 'sw-01', 'port' => 'Gi1/0/8'], ... ]
         $host_expect        = [];   // hid => [{host, port}, ...] (nt:expect → Soll/Ist)
         $host_lldp_names    = [];   // hid => ['sw-core-01', 'SW-CORE-01.lan'] (nt:lldp)
+        $host_tier          = [];
+        $tier_aliases = ['core' => 'spine', 'spine' => 'spine',
+            'distribution' => 'leaf', 'leaf' => 'leaf', 'access' => 'access',
+            'endpoint' => 'endpoint'];
         // Whitelist für nt:icon: nur bekannte Typen, sonst wird ignoriert
         $allowed_icons = ['firewall', 'router', 'switch', 'wireless',
                           'server', 'storage', 'camera', 'printer', 'client',
@@ -64,6 +69,12 @@ final class HostTagParser {
                     $value = strtolower(trim($value));
                     if (in_array($value, $allowed_icons, true)) {
                         $host_icon_override[$hid] = $value;
+                    }
+                } elseif ($name === 'nt:tier') {
+                    $tier = $tier_aliases[strtolower(trim($value))] ?? null;
+                    if ($tier !== null) {
+                        // Ignore conflicting roles rather than depend on tag order.
+                        $host_tier[$hid] = ($host_tier[$hid] ?? $tier) === $tier ? $tier : '';
                     }
                 } elseif ($name === 'nt:show' && $value !== '') {
                     // Item-Key-Cap: realistisch nie >200 Zeichen. Schutz gegen
@@ -239,6 +250,7 @@ final class HostTagParser {
             'uplink'        => $host_uplink,
             'expect'        => $host_expect,
             'lldp'          => $host_lldp_names,
+            'tier'          => array_filter($host_tier),
         ];
     }
 }

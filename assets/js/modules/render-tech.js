@@ -14,6 +14,7 @@
 // State (Modul-privat):
 //   _posSaveTimer — debounce-Timer für drag-save
 
+import { fitTopology } from './layout-spacing.js';
 import { esc, isDark, clearWrap, refreshIntervallMs, refreshLabel } from './utils.js';
 import { t } from './i18n.js';
 import { primaryGroup, SEV_COL, statusColor } from './severity.js';
@@ -22,7 +23,7 @@ import {
     NT_GROUP_VIEW_KEY, NT_LLDP_KEY, NT_PERF_KEY, setGroupViewEffective,
     loadGroupOpen, toggleGroupOpen,
     loadBundleMode, loadBundleOpen, toggleBundleOpen,
-    loadPositions, savePositions, loadPinned, loadNotes, loadLinks, addLink,
+    savePositions, loadPinned, loadNotes, loadLinks, addLink,
     loadLayout, loadTapholdMs, nodeSizeFactor
 } from './storage.js';
 import { aggregateByGroup, aggregateEndpoints, aggregateHostingChildren } from './aggregation.js';
@@ -49,16 +50,16 @@ import { applyTrafficHeatmap, startEdgeAnimation } from './traffic.js';
 import { applyBundleView, bindBundleView, trunkData } from './parallel-links.js';
 import { collapseLeaves, bindCollapse, leafCandidates, collapsePref,
          COLLAPSE_SCHWELLE } from './collapse-leaves.js';
-import { buildLayoutConfig, letzterLayoutGrund } from './layouts.js';
+import { buildLayoutConfig, letzterLayoutGrund, positionsLayout, shouldClusterGroups, usesTieredLayout } from './layouts.js';
 import { buildCytoscapeStyle } from './render-tech-style.js';
 import { injectInternetCloud, injectGhostNodes, buildNodeElements, buildEdgeElements, tagWlanAp, measuredEdgeStatus, edgeStatusKey } from './build-elements.js';
 import { isFocusActive, filterToFocus, dropFocus, renderFocusBanner } from './focus-mode.js';
 import { initClientFocus, revealClientsOf, hideAllClients, isClientNode } from './client-focus.js';
 import { toast, toastTruncatedOnce } from './toast.js';
 import { fetchJson } from './http.js';
-import { setupGroupHulls, destroyGroupHulls } from './group-hulls.js';
-import { runGroupClusterLayout } from './group-cluster-layout.js';
-import { NT_GROUP_CLUSTER_KEY, loadGhostMode, loadRings, loadExpected, loadVlanFilter } from './storage.js';
+import { destroyGroupHulls, updateGroupOutlines } from './group-hulls.js';
+import { runGroupClusterLayout, assignAttachmentGroups } from './group-cluster-layout.js';
+import { loadClusterMode, loadGhostMode, loadRings, loadExpected, loadVlanFilter } from './storage.js';
 import { applyRings } from './rings.js';
 import { applyExpected } from './expected-links.js';
 import { applyVlanFilter } from './vlan-filter.js';
@@ -111,9 +112,45 @@ function _markRefresh(ok, err) {
 // ── ntShowExportOverlay: wird vom Export-Menü in setupToolbar aufgerufen ──
 // (im Hauptmodul). Daher nicht hier — bleibt im Hauptmodul.
 
-export function render(wrap, nodes, edges, dataUrl) {
+function edgeKey(e) {
+    if (e.id !== undefined && e.id !== null) return 'id:' + String(e.id);
+    return JSON.stringify([String(e.source || e.from || ''),
+        String(e.target || e.to || ''), e.ports || {}, e._type || e.kind || '']);
+}
+
+// Metric changes stay in place. A changed graph uses the existing full-render
+// path, including its focus, ghost, aggregation and layout handling.
+function topologySignature(nodes, edges, quality) {
+    return JSON.stringify([
+        nodes.map(function(n) { return [String(n.id), n.type || '']; }).sort(),
+        edges.map(function(e) {
+            return [edgeKey(e), String(e.source || e.from || ''),
+                String(e.target || e.to || ''), !!e.stale, e._type || e.kind || '',
+                e.ports || {}, e.port_idx || {}];
+        }).sort(),
+        (quality || []).map(function(q) {
+            return [String(q.id), q.unmatched || []];
+        }).sort()
+    ]);
+}
+
+export function render(wrap, nodes, edges, dataUrl, retained = null) {
     perfBegin('render tech (' + nodes.length + ' nodes, ' + edges.length + ' edges)');
     const pnl = document.getElementById('nt-detail');
+    // ── Cleanup vorheriger Tab-State ───────────────────────────────────────
+    destroyGroupHulls();
+    if (window._ntEdgeAnim)     { clearInterval(window._ntEdgeAnim);     window._ntEdgeAnim     = null; }
+    if (window._ntCy)           { try { clearPathState(window._ntCy); } catch (e) {}
+                                  try { clearSimulation(window._ntCy); } catch (e) {}
+                                  try { clearRootCause(window._ntCy); } catch (e) {}
+                                  try { window._ntCy.destroy(); } catch (e) {} window._ntCy = null; }
+    window._ntToolbarDone = false;
+    if (window._ntRefreshTimer) {
+        clearInterval(window._ntRefreshTimer);
+        window._ntRefreshTimer = null;
+    }
+    const refreshSignature = topologySignature(nodes, edges,
+        (window._ntLastData && window._ntLastData.lldp_quality) || []);
     if (!nodes.length) {
         wrap.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;'
                        + 'height:100%;color:#999">' + esc(t('tech.no_hosts')) + '</div>';
@@ -251,24 +288,16 @@ export function render(wrap, nodes, edges, dataUrl) {
             toastTruncatedOnce('ghostfilter', t('warn.ghost_filter_idle'));
         }
 
-        // ── Endgeraete buendeln ───────────────────────────────────────────
-        // Erst JETZT, nach der Geister-Injektion: gebuendelt werden nur
-        // Geister, und die entstehen hier. An einem Access-Switch mit 48 Ports
-        // fasst das die namenlosen Blatt-Endgeraete zu einem Knoten zusammen,
-        // der sich per Klick aufklappt — die Umkehrung des 'infra'-Filters,
-        // der sie wegwirft. Voreingestellt an, abschaltbar in der Toolbar.
-        if (loadBundleMode()) {
-            const geb = aggregateEndpoints(nodes, edges, loadBundleOpen());
-            nodes = geb.nodes;
-            edges = geb.edges;
-            // Gleiche Taste, zweite Ebene: viele Blatt-Gaeste (VMs/Pods) je
-            // Traeger einklappen. Derselbe Aufklappzustand (loadBundleOpen) und
-            // dieselbe _isEndpointBundle-Maschinerie wie bei den Endgeraeten.
-            const gst = aggregateHostingChildren(nodes, edges, loadBundleOpen());
-            nodes = gst.nodes;
-            edges = gst.edges;
-        }
     }
+    if (loadBundleMode()) {
+        const open = loadBundleOpen();
+        const endpoints = aggregateEndpoints(nodes, edges, open);
+        // Hosting children are monitored hosts and need no ghost discovery.
+        const guests = aggregateHostingChildren(endpoints.nodes, endpoints.edges, open);
+        nodes = guests.nodes;
+        edges = guests.edges;
+    }
+    assignAttachmentGroups(nodes, edges, groupNames);
 
     // Cytoscape-Elements (Nodes + Edges) bauen
     // ── Performance-Modus: vereinfachte Knoten (Severity-Punkt statt SVG-Pie)
@@ -289,13 +318,6 @@ export function render(wrap, nodes, edges, dataUrl) {
     const elements = buildNodeElements(nodes, perfMode).concat(buildEdgeElements(edges, nodes));
     perfMark('elements built (' + elements.length + ')');
 
-    // ── Cleanup vorheriger Tab-State ───────────────────────────────────────
-    if (window._ntEdgeAnim)     { clearInterval(window._ntEdgeAnim);     window._ntEdgeAnim     = null; }
-    if (window._ntCy)           { try { clearPathState(window._ntCy); } catch (e) {}
-                                  try { clearSimulation(window._ntCy); } catch (e) {}
-                                  try { clearRootCause(window._ntCy); } catch (e) {}
-                                  try { window._ntCy.destroy(); } catch (e) {} window._ntCy = null; }
-    window._ntToolbarDone = false;
     const oldSev    = document.getElementById('nt-sev-filter');   if (oldSev)    oldSev.remove();
     const oldSearch = document.getElementById('nt-search-input'); if (oldSearch) oldSearch.remove();
     clearWrap(wrap);
@@ -321,44 +343,20 @@ export function render(wrap, nodes, edges, dataUrl) {
     // Group-Cluster-Mode aus Storage: 'auto' | 'columns' | 'rows' | 'off'
     // Default 'auto' = adaptive (2-3 Gruppen Spalten, 4+ Gruppen Reihen).
     // User kann das per Toolbar-Toggle überschreiben.
-    let _clusterMode = 'auto';
-    try {
-        const s = localStorage.getItem(NT_GROUP_CLUSTER_KEY);
-        if (s === 'auto' || s === 'columns' || s === 'rows' || s === 'off') {
-            _clusterMode = s;
-        }
-    } catch (e) {}
+    const _clusterMode = _groupViewActive ? 'off' : loadClusterMode();
 
-    // Cluster-Trigger: aktiv wenn ≥2 Gruppen, kein Group-View, Mode != 'off'.
-    // ANDERS als bisher: gespeicherte Positionen (Preset) blockieren den
-    // Cluster-Layout NICHT mehr — sonst sieht der User nie wieder Spalten
-    // sobald er einmal "Speichern" geklickt hat. Im Clustered-Modus hat das
-    // adaptive Layout Vorrang, der User kann mit 'off' zur Preset-Sicht
-    // zurückwechseln.
-    const _useCluster = (!_groupViewActive)
-        && groupNames.length >= 2
-        && _clusterMode !== 'off';
-
-    // EINMAL SAGEN, DASS DIE EIGENE ANORDNUNG GERADE NICHT GILT.
-    //
-    // Die Entscheidung darueber ist alt und bleibt (siehe Absatz oben), aber
-    // sie war stumm. Gemeldet aus r/zabbix: "jedes Neuladen wirft meine Karte
-    // zurueck in ein unlesbares Knaeuel." Der Cluster-Modus schaltet sich ab
-    // zwei Hostgruppen SELBST ein, legt sein eigenes Raster und verwirft die
-    // gespeicherten Positionen kommentarlos. Wer seine Karte von Hand ordnet,
-    // sieht sie beim naechsten Render wieder zerfallen — und haelt das fuer
-    // seinen eigenen Fehler. Der Melder hat wochenlang nicht gefragt.
-    //
-    // Nur wenn es wirklich etwas zu verlieren gibt: ohne gespeicherte
-    // Positionen ist der Hinweis sinnlos und wuerde zum Rauschen.
-    if (_useCluster) {
-        let _hatPositionen = false;
-        try { _hatPositionen = Object.keys(loadPositions() || {}).length > 0; } catch (e) {}
-        if (_hatPositionen) {
-            // Stabile Kennung: der Hinweis gehoert einmal pro Sitzung gesagt,
-            // nicht bei jedem Auto-Refresh.
-            toastTruncatedOnce('clusterpos', t('cluster.overrides_positions'));
-        }
+    const layoutId = loadLayout();
+    const selectedLayout = retained
+        ? positionsLayout(nodes, edges, retained.positions, false)
+        : buildLayoutConfig(layoutId, nodes, edges, false);
+    const _useCluster = !retained && !_groupViewActive
+        && shouldClusterGroups(layoutId, nodes, groupNames.length, _clusterMode, selectedLayout.saved);
+    const packed = !_groupViewActive && (retained ? retained.packed : _useCluster);
+    if (_useCluster && selectedLayout.saved) {
+        toastTruncatedOnce('clusterpos', t('cluster.overrides_positions'));
+    }
+    if (!_useCluster && !retained && letzterLayoutGrund() === 'geister') {
+        toastTruncatedOnce('geisterlayout', t('warn.ghosts_fresh_layout'));
     }
 
     // Layout-Config: bei Cluster ein preset, der eigentliche Layout-
@@ -378,16 +376,7 @@ export function render(wrap, nodes, edges, dataUrl) {
                      positions: function(n) { return _seed[n.id()]; },
                      fit: false };
         })()
-        : (function() {
-            const cfg = buildLayoutConfig(loadLayout(), nodes, edges, false);
-            // Einmal sagen, wenn die eigene Anordnung gerade nicht gilt, weil
-            // die Geister sie weit ueberwiegen. Sonst sieht es aus wie eine
-            // Karte, die ihre Positionen vergessen hat.
-            if (letzterLayoutGrund() === 'geister') {
-                toastTruncatedOnce('geisterlayout', t('warn.ghosts_fresh_layout'));
-            }
-            return cfg;
-        })();
+        : selectedLayout;
     // Im Performance-Modus kein Layout-Animate (bei 1000+ Knoten = Freeze).
     if (perfMode && _initialLayout) _initialLayout.animate = false;
 
@@ -396,13 +385,15 @@ export function render(wrap, nodes, edges, dataUrl) {
         elements: elements,
         style: buildCytoscapeStyle(dark, nodes.length, nodeSizeFactor()),
         layout: _initialLayout,
+        ...(retained ? { pan: retained.pan, zoom: retained.zoom } : {}),
         userZoomingEnabled: true, userPanningEnabled: true, boxSelectionEnabled: false,
         // minZoom klemmt fit(): bei 1000+ Knoten ist das gesamte Layout breiter
         // als 10x Viewport, und mit 0.1 kann fit() nicht weit genug herauszoomen
         // — die Karte zeigt dann einen leeren Ausschnitt (gemessen 2026-10-28,
         // 2000-Host-Lasttest). Fuer grosse Graphen tiefer herauszoomen lassen;
         // kleine behalten die 0.1-Grenze gegen versehentliches Wegzoomen.
-        minZoom: nodes.length > 800 ? 0.02 : 0.1, maxZoom: 4,
+        minZoom: retained ? retained.minZoom : (nodes.length > 800 ? 0.02 : 0.1),
+        maxZoom: 4,
         // Performance bei grossen Graphen (~150-200+ Hosts): Kanten waehrend
         // Pan/Zoom ausblenden und den Viewport als Textur cachen -> deutlich
         // fluessigeres Pannen/Zoomen. motionBlur aus (Default) gegen Ghosting.
@@ -418,6 +409,9 @@ export function render(wrap, nodes, edges, dataUrl) {
 
     // Performance-Modus: einfache Severity-Punkte statt SVG-Pie-Knoten.
     if (perfMode) cy.nodes('[!isGroup]').addClass('nt-perf');
+    updateGroupOutlines(cy, wrap, groupNames, _clusterMode, {
+        packed, tiered: usesTieredLayout(layoutId, nodes)
+    });
 
     // UniFi-Client-Endgeraete ab Frame 1 ausblenden (client-focus.js). Sie
     // bleiben im Graphen (das Layout positioniert sie neben ihrem AP), sind aber
@@ -430,8 +424,7 @@ export function render(wrap, nodes, edges, dataUrl) {
     // setTimeout damit das Canvas seine Größe bekommt.
     // Inner-Layout = die User-Wahl (grid/breadthfirst/concentric/...) damit
     // die Cluster nicht stur cose nutzen wenn der User explizit "Raster" o.ae.
-    // gewaehlt hat. 'auto' und 'hierarchy' fallen in group-cluster-layout
-    // automatisch auf cose zurueck.
+    // gewaehlt hat. 'auto' verwendet Force innerhalb der Gruppen.
     if (_useCluster) {
         const _innerLayout = loadLayout();
         setTimeout(function() {
@@ -465,8 +458,8 @@ export function render(wrap, nodes, edges, dataUrl) {
     //  gehalten.)
 
     // Force resize after DOM settles (Cytoscape misst manchmal zu früh)
-    setTimeout(function() { if (cy && !cy.destroyed()) { cy.resize(); cy.fit(cy.nodes(), 40); } }, 200);
-    setTimeout(function() { if (cy && !cy.destroyed()) { cy.resize(); cy.fit(cy.nodes(), 40); } }, 600);
+    setTimeout(function() { if (cy && !cy.destroyed()) { cy.resize(); if (!retained) fitTopology(cy); } }, 200);
+    setTimeout(function() { if (cy && !cy.destroyed()) { cy.resize(); if (!retained) fitTopology(cy); } }, 600);
 
     // Boot-Pfad-Absicherung gegen "Container-Hoehe 0": der Flex-Wrapper
     // #nt-canvas-wrap bekommt seine Hoehe u.U. erst NACH dem Cytoscape-Init
@@ -477,28 +470,19 @@ export function render(wrap, nodes, edges, dataUrl) {
     // Graph unsichtbar (Daten vorhanden, aber 0px Rendering).
     if (window.ResizeObserver) {
         try { if (window._ntRO) window._ntRO.disconnect(); } catch (e) {}
-        let _fitOnce = false;
+        let _fitOnce = !!retained;
         const _ro = new ResizeObserver(function() {
             if (!cy || cy.destroyed()) { try { _ro.disconnect(); } catch (e) {} return; }
             if (wrap.clientWidth > 0 && wrap.clientHeight > 0) {
                 cyDiv.style.width  = wrap.clientWidth  + 'px';
                 cyDiv.style.height = wrap.clientHeight + 'px';
                 cy.resize();
-                if (!_fitOnce) { _fitOnce = true; cy.fit(cy.nodes(), 40); }
+                if (!_fitOnce) { _fitOnce = true; fitTopology(cy); }
             }
         });
         window._ntRO = _ro;
         _ro.observe(wrap);
     }
-    cy.one('layoutready', function() {
-        const usedPreset = (loadPositions && Object.keys(loadPositions()).length > 0);
-        if (usedPreset) {
-            setTimeout(function() {
-                if (window._ntCy) { window._ntCy.resize(); window._ntCy.fit(window._ntCy.nodes(), 40); }
-            }, 300);
-        }
-    });
-
     // ── Click-Handler: Link-Modus, Highlight, Detail ───────────────────────
     cy.on('tap', 'node[!isGroup]', function(e) {
         // Internet-Wolke ist virtuell — keine Highlights, keine Detail-Panel
@@ -667,14 +651,6 @@ export function render(wrap, nodes, edges, dataUrl) {
     // Farbcode-Erklaerung unten im Canvas (einklappbar, was bedeuten die Farben)
     setupBottomLegend(wrap, dark);
 
-    // Group-Hulls: nur wenn Cluster-Layout aktiv ist (sonst überlappen sich
-    // die Hüllen bei verstreuten Knoten und sehen kaputt aus). Im Group-View
-    // sowieso aus — dort ist jede Gruppe schon ein eigener Aggregat-Knoten.
-    destroyGroupHulls(wrap);
-    if (_useCluster) {
-        setupGroupHulls(cy, wrap);
-    }
-
     // History-Mode-Dimming: Hosts ohne Problem zur Cursor-Zeit ausgrauen.
     // _historyDimmed wird in network-topology.js applyHistoryOverrides gesetzt.
     nodes.forEach(function(n) {
@@ -748,13 +724,13 @@ export function render(wrap, nodes, edges, dataUrl) {
     const _leafAuto = _leafPref === null && leafCandidates(cy).length >= COLLAPSE_SCHWELLE;
     if (_leafPref === true || _leafAuto) {
         const _eingeklappt = collapseLeaves(cy);
-        if (_eingeklappt) {
+        if (_eingeklappt && !retained) {
             // Neu anordnen, sonst steht die geschrumpfte Karte in den Luecken
             // der alten: das erste Layout lief ueber alle 200 Knoten. Der
             // zweite Lauf geht nur ueber die sichtbaren, das sind hier
             // achtzehn statt zweihundert und entsprechend schnell.
             cy.elements(':visible').layout(_initialLayout).run();
-            cy.fit(cy.elements(':visible'), 40);
+            fitTopology(cy, cy.elements(':visible'));
         }
         if (_leafAuto && _eingeklappt) {
             // Einmal sagen, warum weniger zu sehen ist als die Kopfzeile
@@ -823,41 +799,27 @@ export function render(wrap, nodes, edges, dataUrl) {
     // Refresh waehrend Drag aktiv ist; Reset 1s nach dragfree damit die
     // Position-Speicherung sicher durch ist.
     cy.on('grab', 'node[!isGroup]', function() {
+        clearTimeout(window._ntDragReleaseTimer);
         window._ntDragActive = true;
     });
-    cy.on('dragfree', 'node[!isGroup]', function() {
+    cy.on('free', 'node[!isGroup]', function() {
         clearTimeout(window._ntDragReleaseTimer);
         window._ntDragReleaseTimer = setTimeout(function() {
             window._ntDragActive = false;
         }, 1000);
     });
 
-    // Nach automatischem Layout Position einmalig speichern — likewise
-    // skipped in focus mode (same reasoning as the dragfree save above).
+    // Visiting a map must never publish an automatically generated layout.
     cy.one('layoutstop', function() {
         perfMark('layoutstop fired');
-        // layoutstop feuert, wenn das Layout (inkl. Animation) fertig ist — die
-        // Buchhaltung danach (Positionen sichern, Fit, Traffic/Labels/Ringe) kann
-        // kurz danach laufen. Frueher 800ms; gemessen (NT-PERF) war das fast die
-        // Haelfte der 1,4s bis "Karte nutzbar", ohne Grund. 250ms reicht und
-        // bleibt hinter dem letzten Fit (+600ms ab Render-Start), sodass der nicht
-        // ueber diese Positionen draufrendert.
         setTimeout(function() {
-            if (window._ntCy) {
-                // Nach einem Datei-Import (layout-file.js importLayout) einmal
-                // NICHT zurueckspeichern: der Import hat die Positionen schon
-                // gemergt und persistiert; im Cluster-Modus wuerde dieser Save
-                // die Cluster-Ausgabe darueberlegen und den Import verwerfen.
-                const skipSave = window._ntSkipNextLayoutSave === true;
-                window._ntSkipNextLayoutSave = false;
-                if (!isFocusActive() && !skipSave) savePositions(window._ntCy);
-                window._ntCy.fit(window._ntCy.nodes(), 40);
-                applyTrafficHeatmap(window._ntCy);
-                applyPortLabels(window._ntCy);
-                if (loadRings()) applyRings(window._ntCy);
-                if (loadExpected()) applyExpected(window._ntCy);
-                perfMark('post-layout overlays done (traffic/labels/rings) — map usable');
-            }
+            if (window._ntCy !== cy || cy.destroyed()) return;
+            if (!retained) fitTopology(cy);
+            applyTrafficHeatmap(cy);
+            applyPortLabels(cy);
+            if (loadRings()) applyRings(cy);
+            if (loadExpected()) applyExpected(cy);
+            perfMark('post-layout overlays done (traffic/labels/rings) — map usable');
         }, 250);
     });
 
@@ -894,8 +856,8 @@ export function render(wrap, nodes, edges, dataUrl) {
                 // waehrend der Tabellen-Reiter markiert blieb — oder rief in
                 // der Nicht-Gruppenansicht cy.nodes() auf einer zerstoerten
                 // Instanz auf.
-                if (window._ntRefreshOn === false || !window._ntCy
-                        || (window._ntCy.destroyed && window._ntCy.destroyed())) {
+                if (window._ntRefreshOn === false || window._ntDragActive
+                        || window._ntCy !== cy || cy.destroyed()) {
                     return;
                 }
 
@@ -909,8 +871,17 @@ export function render(wrap, nodes, edges, dataUrl) {
                 // strukturell ändern, In-Place-Update wäre fragil)
                 let inGroupView = false;
                 try { inGroupView = localStorage.getItem(NT_GROUP_VIEW_KEY) === '1'; } catch (e) {}
-                if (inGroupView) {
-                    render(wrap, data.nodes.slice(), (data.edges || []).slice(), dataUrl);
+                if (inGroupView || topologySignature(data.nodes, data.edges || [],
+                        data.lldp_quality || []) !== refreshSignature) {
+                    const positions = Object.create(null);
+                    cy.nodes('[!isGroup]').forEach(function(node) {
+                        const { x, y } = node.position();
+                        if (Number.isFinite(x) && Number.isFinite(y)) positions[node.id()] = { x, y };
+                    });
+                    render(wrap, data.nodes.slice(), (data.edges || []).slice(), dataUrl, {
+                        positions, pan: { ...cy.pan() }, zoom: cy.zoom(), minZoom: cy.minZoom(),
+                        packed: !!wrap.querySelector('#nt-group-hulls[data-packed="true"]')
+                    });
                     return;
                 }
                 const map = {};
