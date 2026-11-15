@@ -2,6 +2,12 @@
 
 Changes since the first public release. Versioning: MAJOR.MINOR.PATCH.
 
+## v5.6.13 — Unreleased
+
+### Fixed
+
+- Use the unique interface tag from an interface status item when ifName and ifDescr are unavailable, preserving labels such as 1/0/1.
+
 ## v5.6.12 — 2026-11-14
 
 ### Fixed

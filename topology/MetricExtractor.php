@@ -147,6 +147,7 @@ final class MetricExtractor {
         // LldpEdgeBuilder loest damit den echten ifIndex auf, wo
         // lldpRemLocalPortNum != ifIndex ist (Arista/Mellanox/Cumulus).
         $lldp_local = [];
+        $port_tag_names = [];
 
         foreach ($items_a as $item) {
             $hid = $item['hostid'];
@@ -381,6 +382,15 @@ final class MetricExtractor {
             // Interface-Namen einsammeln. Eigener Block VOR den Health-Branches,
             // weil ifAlias/ifName/ifDescr sonst im generischen net.if-Zweig
             // haengenblieben.
+            $tag_ifx = self::interfaceStatusIndex($key);
+            if ($tag_ifx !== '') {
+                foreach ($item['tags'] ?? [] as $tag) {
+                    $label = trim((string) ($tag['value'] ?? ''));
+                    if (($tag['tag'] ?? '') === 'interface' && $label !== '') {
+                        $port_tag_names[$hid][$tag_ifx][$label] = true;
+                    }
+                }
+            }
             if (strpos($key, 'ifName') !== false || strpos($key, 'ifDescr') !== false
                     || strpos($key, 'ifAlias') !== false) {
                 $rang = (strpos($key, 'ifName') !== false) ? 1
@@ -994,6 +1004,18 @@ final class MetricExtractor {
             }
         }
 
+        // Eindeutige Discovery-Namen als Fallback. IF-MIB-Identitaeten gewinnen;
+        // freie Aliase bleiben hinter dem entdeckten Interface-Namen zurueck.
+        foreach ($port_tag_names as $hid => $perIdx) {
+            foreach ($perIdx as $ifx => $labels) {
+                if (count($labels) !== 1 || ($port_name_rank[$hid][$ifx] ?? 4) < 3) {
+                    continue;
+                }
+                $label = (string) array_key_first($labels);
+                $port_names[$hid][$ifx] = self::capName($label);
+            }
+        }
+
         return [
             'traffic'  => $host_traffic,
             'iface'    => $host_iface,
@@ -1146,6 +1168,15 @@ final class MetricExtractor {
             return ($m[1] === 'in' || $m[1] === 'out') ? [$m[2], $m[3]] : null;
         }
         return [$m[1], $m[3]];
+    }
+
+    /** IF-MIB-Status liefert einen sicheren ifIndex fuer Discovery-Labels. */
+    public static function interfaceStatusIndex(string $key): string {
+        if (preg_match('/(?:^ifOperStatus\[|\[ifOperStatus\.)(\d+)\]$/', $key, $m)) {
+            return $m[1];
+        }
+        $snmp = self::snmpIfKey($key);
+        return $snmp !== null && $snmp[0] === 'status' ? $snmp[1] : '';
     }
 
     /**
