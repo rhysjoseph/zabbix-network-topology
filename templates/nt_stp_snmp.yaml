@@ -35,10 +35,26 @@ zabbix_export:
         - macro: '{$NT.STP.INTERVAL}'
           value: 5m
           description: 'Polling interval of the STP port-state items. STP state changes on convergence, so a few minutes is plenty.'
+        - macro: '{$NT.STP.PORT.STATE.OID}'
+          value: '1.3.6.1.2.1.17.2.15.1.3'
+          description: 'Port state column. Set to 1.3.6.1.4.1.4526.10.1.2.15.9.1.5 on Netgear M4350 hosts that expose CIST state instead of BRIDGE-MIB port state.'
         - macro: '{$NT.BCAST.INTERVAL}'
           value: 2m
           description: 'Polling interval of the per-port broadcast rate (loop/storm detection, Stufe 3b). A loop floods broadcast frames, so a shorter interval than STP catches it sooner.'
       items:
+        - uuid: f63549d5ff64409aa066aae2b7dbf5e0
+          name: 'STP: bridge notifications'
+          type: SNMP_TRAP
+          key: 'snmptrap["(?:snmpTrapOID\.0|(?:iso|\.?1)\.3\.6\.1\.6\.3\.1\.1\.4\.1\.0)\s*=\s*(?:OID:\s*)?(?:(?:BRIDGE-MIB::)?(?:newRoot|topologyChange)|(?:iso|\.?1)\.3\.6\.1\.2\.1\.17\.0\.[12])(?:\s|$)"]'
+          delay: '0'
+          history: 7d
+          value_type: LOG
+          trends: '0'
+          status: DISABLED
+          description: 'Opt-in standard bridge notifications. A topology change can request a fresh STP poll; this item alone does not identify a blocked port.'
+          tags:
+            - tag: component
+              value: topology
         - uuid: 3528b7084b1e4537a75b3ad0b4a2a2f9
           name: 'MAC flapping: moved entries last interval'
           type: TRAP
@@ -82,7 +98,7 @@ zabbix_export:
         - uuid: f9a6280241b84718ad623320b1b77c80
           name: 'STP: port-state table (SNMP walk)'
           type: SNMP_AGENT
-          snmp_oid: 'walk[1.3.6.1.2.1.17.2.15.1.3,1.3.6.1.2.1.17.1.4.1.2,1.3.6.1.2.1.17.2.15.1.8,1.3.6.1.2.1.17.2.15.1.9,1.3.6.1.2.1.17.1.1]'
+          snmp_oid: 'walk[{$NT.STP.PORT.STATE.OID},1.3.6.1.2.1.17.1.4.1.2,1.3.6.1.2.1.17.2.15.1.8,1.3.6.1.2.1.17.2.15.1.9,1.3.6.1.2.1.17.1.1]'
           key: nt.stp.walk
           delay: '{$NT.STP.INTERVAL}'
           history: 1h
@@ -97,6 +113,12 @@ zabbix_export:
               dot1dStpPortDesignatedBridge 1.3.6.1.2.1.17.2.15.1.8  (bridge-id at the other end)
               dot1dStpPortDesignatedPort   1.3.6.1.2.1.17.2.15.1.9  (port-id at the other end)
               dot1dBaseBridgeAddress       1.3.6.1.2.1.17.1.1.0     (own bridge MAC)
+
+            On Netgear M4350, override {$NT.STP.PORT.STATE.OID} with
+            1.3.6.1.4.1.4526.10.1.2.15.9.1.5 (agentStpCstPortForwardingState, indexed by
+            ifIndex). Per-port items translate CIST values into BRIDGE-MIB
+            states. The remaining columns are still used for bridge-port
+            discovery and loop identification where reported.
 
             Discovery and the per-port state item hang off this walk as DEPENDENT
             and parse its text, so there is not a single instance-exact GET -- the
@@ -170,10 +192,21 @@ zabbix_export:
               master_item:
                 key: nt.stp.walk
               preprocessing:
-                - type: REGEX
+                - type: JAVASCRIPT
                   parameters:
-                    - '(?m)^\.?1\.3\.6\.1\.2\.1\.17\.2\.15\.1\.3\.{#SNMPINDEX} = [A-Za-z0-9-]+: (\d+)'
-                    - '\1'
+                    - |
+                      // BRIDGE-MIB is keyed by bridge port. Netgear CIST uses ifIndex.
+                      var standard = /^\.?1\.3\.6\.1\.2\.1\.17\.2\.15\.1\.3\.{#SNMPINDEX}\s*=\s*[A-Za-z0-9-]+:\s*([1-6])(?:\s|$)/m.exec(value);
+                      if (standard) {
+                          return standard[1];
+                      }
+                      var cist = /^\.?1\.3\.6\.1\.4\.1\.4526\.10\.1\.2\.15\.9\.1\.5\.{#NT_IFINDEX}\s*=\s*[A-Za-z0-9-]+:\s*([1-4])(?:\s|$)/m.exec(value);
+                      if (cist) {
+                          // Discarding, learning, forwarding, disabled.
+                          return ['2', '4', '5', '1'][Number(cist[1]) - 1];
+                      }
+                      // Manual forwarding and non-participating ports lack an STP state.
+                      throw 'No bridge or CIST port state';
                   error_handler: DISCARD_VALUE
               history: 7d
               trends: '0'
