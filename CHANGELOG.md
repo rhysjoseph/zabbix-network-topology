@@ -6,6 +6,15 @@ Changes since the first public release. Versioning: MAJOR.MINOR.PATCH.
 
 Updated 2026-11-18 for the fork based on upstream v5.6.13.
 
+### SNMP templates
+
+- The shared STP template can read Netgear M4350 CIST port states through
+  `{$NT.STP.PORT.STATE.OID}`. It keeps the existing per-port item keys and
+  translates CIST states for the map. Standard BRIDGE-MIB remains the default.
+- The shared LLDP and STP templates provide opt-in SNMP trap log items for
+  link up/down and bridge notifications, respectively. Polling continues to
+  supply the map's interface and STP state.
+
 ### Layout and grouping
 
 - **Optional device tiers.** The `nt:tier` host tag drives Hierarchy rows and

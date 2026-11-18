@@ -38,8 +38,9 @@ alarm.
 ## The template
 
 Import **`templates/nt_stp_snmp.yaml`** (*Data collection → Templates → Import*)
-and link **“NT Spanning-Tree by SNMP”** to your managed switches. All items are
-**SNMP agent** except the one trapper noted below.
+and link **“NT Spanning-Tree by SNMP”** to your managed Layer 2 switches.
+The template includes polled items, an optional SNMP trap item and a Zabbix
+trapper for the MAC-flap sender.
 
 | What | Key | Source OID | Feeds |
 |---|---|---|---|
@@ -62,7 +63,22 @@ The walks drive two discovery rules that create the per-port items
 | Macro | Default | Meaning |
 |---|---|---|
 | `{$NT.STP.INTERVAL}` | `5m` | poll interval of the STP items (STP changes on convergence; minutes is plenty) |
+| `{$NT.STP.PORT.STATE.OID}` | `1.3.6.1.2.1.17.2.15.1.3` | port state column in the shared STP walk |
 | `{$NT.BCAST.INTERVAL}` | `2m` | poll interval of the per-port broadcast rate (shorter — a loop floods broadcast, catch it sooner) |
+
+On Netgear M4350 switches that expose CIST state and an empty standard
+port state column, set `{$NT.STP.PORT.STATE.OID}` to
+`1.3.6.1.4.1.4526.10.1.2.15.9.1.5`. The existing walk and discovery
+still provide `nt.if.stp[ifIndex]` with the BRIDGE-MIB state values the
+map uses. This is the common spanning tree state. No individual VLAN
+or MST instance state is inferred from it.
+
+The shared STP template can capture standard `newRoot` and
+`topologyChange` traps. The shared LLDP neighbours template can capture
+`linkDown` and `linkUp`. Enable the corresponding items on Zabbix hosts
+whose server or proxy receives SNMP traps. Both items are disabled by
+default. The notifications are stored as log items. The walk and
+interface polls provide the map state.
 
 Switches that don't speak STP over SNMP simply leave those items unsupported;
 their rings stay **unknown** (grey), and the module does not warn on them.

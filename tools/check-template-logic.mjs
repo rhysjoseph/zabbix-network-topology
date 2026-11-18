@@ -280,8 +280,44 @@ check('ChassisId mit aktuellem RemIndex extrahierbar',
 check('PortId mit aktuellem RemIndex extrahierbar',
       extract(SG200_AFTER, '7', '67', '12982'), '00 11 22 33 44 55');
 
+console.log('\n  Shared STP walk and SNMP trap filters');
+const stpTemplate = readFileSync(join(ROOT, 'templates', 'nt_stp_snmp.yaml'), 'utf8');
+const stpPrototype = stpTemplate.split("key: 'nt.if.stp[")[1]?.split('error_handler: DISCARD_VALUE')[0];
+const stpScript = stpPrototype?.split('                    - |\n')[1];
+if (!stpScript) abort('Missing shared STP preprocessing');
+const stpValue = new Function('value', stpScript.replaceAll('{#SNMPINDEX}', '121').replaceAll('{#NT_IFINDEX}', '66'));
+const bridge = '.1.3.6.1.2.1.17.2.15.1.3';
+const cist = '.1.3.6.1.4.1.4526.10.1.2.15.9.1.5';
+check('BRIDGE-MIB uses bridge port and preserves the state',
+    [1, 2, 3, 4, 5, 6].map(v => stpValue(`${bridge}.121 = INTEGER: ${v}\n`)), ['1', '2', '3', '4', '5', '6']);
+check('M4350 CIST uses ifIndex and translates its enum',
+    [1, 2, 3, 4].map(v => stpValue(`${cist}.66 = INTEGER: ${v}\n`)), ['2', '4', '5', '1']);
+check('Missing and non-STP data are discarded',
+    ['', `${cist}.121 = INTEGER: 1\n`, `${cist}.66 = INTEGER: 5\n`, `${cist}.66 = INTEGER: 6\n`]
+        .map(value => {
+            try { stpValue(value); return false; } catch { return true; }
+        }),
+    [true, true, true, true]);
+
+const trapFilter = text => {
+    const regex = text.match(/key: 'snmptrap\["(.*)"\]'/)?.[1];
+    if (!regex) abort('Missing SNMP trap filter');
+    return new RegExp(regex);
+};
+const linkTrap = trapFilter(lines.join('\n'));
+const bridgeTrap = trapFilter(stpTemplate);
+const notifications = [
+    'iso.3.6.1.6.3.1.1.5.3', 'iso.3.6.1.6.3.1.1.5.4', 'IF-MIB::linkUp',
+    'iso.3.6.1.2.1.17.0.2', 'BRIDGE-MIB::newRoot',
+    'iso.3.6.1.6.3.1.1.5.5', 'iso.3.6.1.4.1.4526.10.1.0.25', 'iso.3.6.1.6.3.1.1.5.34'
+].map(oid => 'iso.3.6.1.6.3.1.1.4.1.0 = ' + oid);
+check('Link traps select linkDown and linkUp', notifications.map(value => linkTrap.test(value)),
+    [true, true, true, false, false, false, false, false]);
+check('Bridge traps select topologyChange and newRoot', notifications.map(value => bridgeTrap.test(value)),
+    [false, false, false, true, true, false, false, false]);
+
 if (failures > 0) {
     console.log(`\ncheck-template-logic: ${failures} Fehler.`);
     process.exit(1);
 }
-console.log('\ncheck-template-logic: Discovery und alle sechs Prototypen verhalten sich wie erwartet.');
+console.log('\ncheck-template-logic: LLDP discovery, STP states and trap filters passed.');

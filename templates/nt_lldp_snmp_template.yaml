@@ -29,6 +29,19 @@ zabbix_export:
           value: 3h
           description: 'DEPRECATED since the walk[] rework: LLDP discovery is now a dependent rule on the walk item and follows {$NT.LLDP.INTERVAL}. Only still used by the (Cisco) CDP discovery.'
       items:
+        - uuid: 725a0f960ffd442b8c3c2acf508401db
+          name: 'Interface: link up/down notifications'
+          type: SNMP_TRAP
+          key: 'snmptrap["(?:snmpTrapOID\.0|(?:iso|\.?1)\.3\.6\.1\.6\.3\.1\.1\.4\.1\.0)\s*=\s*(?:OID:\s*)?(?:(?:IF-MIB::)?link(?:Down|Up)|(?:iso|\.?1)\.3\.6\.1\.6\.3\.1\.1\.5\.[34])(?:\s|$)"]'
+          delay: '0'
+          history: 7d
+          value_type: LOG
+          trends: '0'
+          status: DISABLED
+          description: 'Opt-in link notifications for a targeted IF-MIB recheck. Keep periodic interface polls for reconciliation.'
+          tags:
+            - tag: component
+              value: topology
         - uuid: 084b4a88188c4714abbd5055588aa4ac
           name: 'LLDP: remote systems table (SNMP walk)'
           type: SNMP_AGENT
