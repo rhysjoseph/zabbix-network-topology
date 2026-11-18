@@ -4,7 +4,7 @@ Changes since the first public release. Versioning: MAJOR.MINOR.PATCH.
 
 ## Production fork additions
 
-Updated 2026-11-15 for the fork based on upstream v5.6.12.
+Updated 2026-11-18 for the fork based on upstream v5.6.13.
 
 ### Layout and grouping
 
@@ -65,28 +65,46 @@ Updated 2026-11-15 for the fork based on upstream v5.6.12.
   prepared value fall back to the database. [Worker setup and requirements](tools/prepared-history/README.md)
   · [Upstream performance discussion #35](https://github.com/linuser/zabbix-network-topology/issues/35)
 
-### Interface display and recovery
+### Topology map interface labels
 
-- **Cisco 24-port Front Panel.** Catalyst 1200 and CBS350 switches that number
-  copper ports `Gi1`–`Gi24` and uplinks `Te1`–`Te4` now show a 24+4 panel,
-  including the `Gi1/0/…` and `Te1/0/…` naming form. Uplink ifIndexes such as
-  49–52 retain their status and counters while being drawn in the four uplink
-  slots. An undiscovered uplink leaves its slot empty.
-- **Discovered interface labels.** A unique `interface` tag from an interface
-  status item supplies the display name when `ifName` and `ifDescr` are
-  absent. This retains Netgear labels such as `1/0/1` when the template would
-  otherwise leave the map with a numeric port index. Front Panel still
-  requires the corresponding IF-MIB items to be discovered.
-- **Recovery from an empty Technical view.** When a restored severity filter
-  would hide every available node on startup, the page clears that saved
-  filter and shows the map.
-
-The v5.6.12 baseline also carries the previously reported LLDP local-port
-mapping for Arista and Mellanox and the live link-status repaint. See the
-[v5.6.10](#v5610--2026-11-12) and [v5.6.9](#v569--2026-11-11) release notes.
+- A unique `interface` tag on an interface status item supplies names such as
+  `1/0/1` on the topology map when `ifName` and `ifDescr` are absent.
+  The upstream faceplate uses its own tag fallback.
 
 [Layout examples and screenshots](docs/fork-layout-update.md) ·
 [Docker fixtures and browser checks](tools/layout-lab/README.md)
+
+## v5.6.13 — 2026-11-17
+
+### New
+
+- **Cisco 24-port front panel.** Catalyst 1200 / CBS350 switches that number
+  copper ports `Gi1`–`Gi24` and uplinks `Te1`–`Te4` (with or without the
+  `1/0/…` form) now draw as a 24+4 faceplate. The uplinks' ifIndexes are often
+  49–52, so the generic numbering fell back to the ifIndex spacing and drew them
+  as a 48+4 chassis; they are now placed in the four uplink slots by name while
+  keeping their real ifIndex for status and counters. An undiscovered uplink
+  leaves its slot empty. Detection is conservative — it only triggers on a real
+  24-port copper bank plus uplinks with consistent naming, otherwise the
+  existing numbering is unchanged.
+- **Port names from an `interface` item tag.** Where `ifName`/`ifDescr` are
+  absent and the item name carries only a bare index, a unique `interface` tag
+  on the interface item (e.g. `1/0/1`) now supplies the faceplate port name —
+  retaining Netgear-style labels instead of a numeric index. Lowest priority:
+  `ifName`/`ifDescr` and the item name still win.
+
+### Fixed
+
+- **Recovery from an empty Technical view.** A severity filter saved in a
+  previous session could match none of the nodes shown now (a different host
+  group, the problem cleared), leaving the map blank on startup — which looks
+  like a fault, not a filter. When a restored filter would hide every visible
+  node, it is now cleared and the full map is shown. A deliberate filter click
+  that hides everything is unchanged, and a map with no nodes keeps the saved
+  filter.
+
+Ideas and reproductions shared by rhysjoseph (PR #33 and the #35 thread);
+reimplemented with our own tests.
 
 ## v5.6.12 — 2026-11-14
 

@@ -35,7 +35,6 @@ export function filterSchluessel(n) {
 
 // Modul-State: Set<number> der aktiven Severity-Levels (plus SEV_GHOST).
 const _sevFilter = loadSevFilter();
-let _restoringSevFilter = true;
 // Modul-State: Toggle "nur offline-Hosts zeigen". Persistiert NICHT in
 // localStorage — das ist eher ein Ad-hoc-Filter ("zeig mir gerade die
 // Toten") als eine Dauer-Praeferenz.
@@ -46,6 +45,13 @@ let _offlineOnly = false;
 // Problemen, ein gespeicherter Filter zeigte sonst nach dem naechsten Fetch auf
 // einen anderen Satz Hosts.
 let _slaOnly = false;
+// Recovery aus leerer Technical-Ansicht (s. buildSevFilter) darf NUR EINMAL
+// beim Start laufen — buildSevFilter wird bei JEDEM Technical-Render neu
+// aufgerufen (render-tech.js entfernt die Toolbar, toolbar.js baut sie neu).
+// Liefe die Recovery jedesmal, loeschte ein Tab-Wechsel/Wallboard-Zyklus einen
+// BEWUSST gesetzten Filter, sobald sein Satz gerade leer ist. Modul-State
+// ueberlebt die Re-Renders (das Modul wird einmal importiert).
+let _recoveryGeprueft = false;
 // Setzt die Pills/Ghost-Pille optisch auf den aktuellen _sevFilter-Zustand.
 // Von buildSevFilter belegt (Closure ueber wrap), damit setSevLevels() den
 // Filter von aussen (KPI-Kacheln) aendern kann, ohne dass Pills und Karte
@@ -137,17 +143,6 @@ export function activeSevLevels() {
 
 export function buildSevFilter(bar, cy) {
     if (document.getElementById('nt-sev-filter')) return;
-    if (_restoringSevFilter) {
-        _restoringSevFilter = false;
-        if (_sevFilter.size > 0) {
-            // A saved filter from another map can hide every node on startup.
-            const nodes = cy.nodes('[!isGroup]').filter(function(n) { return n.visible(); });
-            if (nodes.length > 0 && !nodes.some(function(n) { return _sevFilter.has(filterSchluessel(n)); })) {
-                _sevFilter.clear();
-                saveSevFilter(_sevFilter);
-            }
-        }
-    }
     const wrap = document.createElement('div');
     wrap.id = 'nt-sev-filter';
     wrap.style.cssText = 'display:flex;align-items:center;gap:5px;margin-left:10px;'
@@ -327,5 +322,49 @@ export function buildSevFilter(bar, cy) {
     // Initial-Apply: gespeicherter Filter muss auf das frisch gerenderte
     // Cytoscape angewendet werden, sonst sieht man die markierten Pillen
     // ohne entsprechenden Effekt auf der Karte.
-    if (_sevFilter.size > 0) applyFilter(cy);
+    //
+    // Recovery: ein aus einer FRUEHEREN Sitzung gespeicherter Filter kann auf
+    // die jetzt gezeigten Knoten gar nicht mehr passen (andere Hostgruppe, das
+    // Problem ist weg). Die Karte waere dann beim Start LEER — und das sieht aus
+    // wie ein Defekt, nicht wie ein Filter. Passt kein einziger sichtbarer Knoten,
+    // den gespeicherten Filter verwerfen und die volle Karte zeigen. Nur hier
+    // beim Erst-Apply; ein bewusster Pillen-Klick, der alles ausblendet, bleibt
+    // die Entscheidung des Nutzers. Hat die Karte ueberhaupt keine Knoten, bleibt
+    // der Filter stehen (nichts zu heilen, er kann spaeter wieder passen).
+    if (_sevFilter.size > 0) {
+        // Recovery NUR beim ersten Aufbau MIT Knoten (Startup), dann nie wieder:
+        // ein spaeterer bewusster Pillen-Klick, der alles ausblendet, bleibt die
+        // Entscheidung des Nutzers. Die Pruefung erst, wenn ueberhaupt Knoten da
+        // sind — sonst verpufft sie auf einem noch leeren Erst-Render.
+        if (!_recoveryGeprueft) {
+            const _keys = cy.nodes('[!isGroup]').filter(function(n) {
+                return n.visible();
+            }).map(filterSchluessel);
+            if (_keys.length > 0) {
+                _recoveryGeprueft = true;
+                if (filterVerstecktAlles(_sevFilter, _keys)) {
+                    _sevFilter.clear();
+                    saveSevFilter(_sevFilter);
+                    if (_syncUI) _syncUI();
+                }
+            }
+        }
+        applyFilter(cy);
+    }
+}
+
+// Wuerde ein gespeicherter Filter beim Start ALLE sichtbaren Knoten ausblenden?
+// Ja nur, wenn es ueberhaupt Knoten gibt und KEINER in den Filter passt — dann
+// ist die Karte leer und sieht wie ein Defekt aus, nicht wie ein Filter, und der
+// Aufrufer verwirft den gespeicherten Filter. Keine Knoten → false (nichts zu
+// heilen, der Filter kann spaeter wieder passen). Rein + exportiert, damit
+// ci:frontend die Regel ohne Browser prueft.
+//
+// @param {Set<number>} sevFilter  aktive Filterstufen (inkl. SEV_GHOST)
+// @param {number[]} nodeKeys      filterSchluessel je sichtbarem Nicht-Gruppen-Knoten
+export function filterVerstecktAlles(sevFilter, nodeKeys) {
+    if (!sevFilter || sevFilter.size === 0 || !nodeKeys || nodeKeys.length === 0) {
+        return false;
+    }
+    return !nodeKeys.some(function(k) { return sevFilter.has(k); });
 }

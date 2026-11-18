@@ -1216,6 +1216,13 @@ const sevg = szenario('sev-ghost', { lang: 'en_US' }, `
         konst:    S.SEV_GHOST,
         // Der Schluessel darf mit keiner echten Severity kollidieren.
         kollision: [0,1,2,3,4,5].indexOf(S.SEV_GHOST),
+        // Recovery aus leerer Technical-Ansicht: ein gespeicherter Filter, der
+        // auf KEINEN sichtbaren Knoten passt, wird beim Start verworfen.
+        verstecktKeiner:     S.filterVerstecktAlles(new Set([3]), [0, 0, 1]),
+        verstecktEiner:      S.filterVerstecktAlles(new Set([3]), [0, 3, 1]),
+        verstecktLeererF:    S.filterVerstecktAlles(new Set(),    [0, 0]),
+        verstecktKeineKnoten:S.filterVerstecktAlles(new Set([3]), []),
+        verstecktGeist:      S.filterVerstecktAlles(new Set([S.SEV_GHOST]), [0, 0]),
     }));
 `);
 if (sevg) {
@@ -1225,6 +1232,11 @@ if (sevg) {
     pruefe('Host mit severity 3 bleibt 3',       sevg.warn, 3);
     pruefe('fehlende Severity zaehlt als 0',     sevg.ohneSev, 0);
     pruefe('Geist schlaegt eine gesetzte Severity', sevg.geistSev, sevg.konst);
+    pruefe('Filter passt auf keinen Knoten -> verwerfen', sevg.verstecktKeiner, true);
+    pruefe('ein passender Knoten -> Filter behalten',     sevg.verstecktEiner, false);
+    pruefe('leerer Filter -> nichts verwerfen',           sevg.verstecktLeererF, false);
+    pruefe('keine Knoten -> Filter behalten',             sevg.verstecktKeineKnoten, false);
+    pruefe('Geist-Filter ohne Geister -> verwerfen',      sevg.verstecktGeist, true);
 }
 
 for (const savedLevel of [0, 5]) {
@@ -1240,14 +1252,28 @@ for (const savedLevel of [0, 5]) {
             visible() { return this.display !== 'none'; },
             style(key, value) { if (key === 'display') this.display = value; },
         };
-        const cy = { nodes: () => [host], edges: () => [] };
+        const hidden = {
+            data: (key) => key === 'severity' ? 5 : undefined,
+            visible: () => false,
+            style() {},
+        };
+        const nodes = [];
+        const cy = {
+            nodes: () => nodes,
+            edges: () => [],
+            elements: () => ({ style: (key, value) => nodes.forEach(n => n.style(key, value)) }),
+        };
+        S.buildSevFilter(dom.el('div'), cy);
+        const emptySaved = JSON.parse(localStorage.getItem(key));
+        nodes.push(host, hidden);
         S.buildSevFilter(dom.el('div'), cy);
         const initial = { visible: host.visible(), saved: JSON.parse(localStorage.getItem(key)) };
         S.setSevLevels(cy, [5]);
         S.buildSevFilter(dom.el('div'), cy);
-        console.log(JSON.stringify({ initial, explicit: host.visible() }));
+        console.log(JSON.stringify({ emptySaved, initial, explicit: host.visible() }));
     `);
     if (restored) {
+        pruefe('An empty view keeps the saved filter', restored.emptySaved, [savedLevel]);
         pruefe('Saved filter leaves a node visible', restored.initial.visible, true);
         pruefe('Only an unmatched saved filter is cleared', restored.initial.saved, savedLevel === 0 ? [0] : []);
         pruefe('Explicit filter remains active on re-render', restored.explicit, false);

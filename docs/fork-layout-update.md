@@ -1,6 +1,6 @@
 # Topology layouts for temporary event networks
 
-This update brings our fork of Network Topology for Zabbix to upstream v5.6.12 and bundles the changes we use when building temporary networks for live events. During setup, operators need to see which devices belong to each network, check the links as the crew patches the show, and keep a useful map open on a second screen. The same workflow starts again at the next event.
+Our fork of Network Topology for Zabbix includes layout changes for the temporary networks we build for live events. During setup, operators need to see which devices belong to each network, check the links as the crew patches the show, and keep a useful map open on a second screen. The same workflow starts again at the next event.
 
 The screenshots use 31 synthetic hosts and 50 links in a local Zabbix 7.0 Docker lab. The fixture includes Media Red, Media Blue, Utility and Routing groups. [Reproduce the lab setup](../tools/layout-lab/README.md).
 
